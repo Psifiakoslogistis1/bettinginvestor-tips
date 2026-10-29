@@ -73,7 +73,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
+import gr.bettinginvestor.tips.data.LiveOverlay
+import gr.bettinginvestor.tips.data.LiveScore
 import gr.bettinginvestor.tips.data.MartingaleStore
+import gr.bettinginvestor.tips.data.TipSort
 import gr.bettinginvestor.tips.data.User
 import java.util.Locale
 
@@ -92,6 +95,7 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
     var lossMultInput by remember { mutableStateOf(MartingaleStore.lossMultiplier().toString()) }
     var showResetConfirm by remember { mutableStateOf(false) }
     var remote by remember { mutableStateOf<MartingaleState?>(null) }
+    var liveMap by remember { mutableStateOf<Map<Int, LiveScore>>(emptyMap()) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(unlocked) {
@@ -99,18 +103,36 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
         while (isActive) {
             MartingaleStore.syncFromTips(LocalDemoStore.allTips())
             try {
+                liveMap = ApiClient.liveScores()
+            } catch (_: Exception) { }
+            try {
                 if (ApiClient.token != null) remote = ApiClient.martingale()
             } catch (_: Exception) { }
-            delay(45_000)
+            delay(20_000)
         }
     }
 
-    // Force local recompute when tick changes; prefer remote when available
     val localState = remember(tick) {
         MartingaleStore.syncFromTips(LocalDemoStore.allTips())
         MartingaleStore.state()
     }
-    val state = remote ?: localState
+    val baseState = remote ?: localState
+    val byName = remember(liveMap, baseState) {
+        LiveOverlay.nameIndexFromTips(
+            LocalDemoStore.allTips(),
+            liveMap,
+        ) + baseState.bets.mapNotNull { b ->
+            val live = b.live ?: return@mapNotNull null
+            LiveOverlay.normName(b.matchName) to live
+        }.toMap()
+    }
+    val state = remember(baseState, liveMap, byName) {
+        baseState.copy(
+            bets = TipSort.martingaleNewestFirst(
+                baseState.bets.map { LiveOverlay.forBet(it, liveMap, byName) },
+            ),
+        )
+    }
     val history = remember(tick, remote) {
         val s = remote
         if (s != null) {
@@ -139,6 +161,7 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                         IconButton(onClick = {
                             tick++
                             scope.launch {
+                                try { liveMap = ApiClient.liveScores() } catch (_: Exception) { }
                                 try { if (ApiClient.token != null) remote = ApiClient.martingale() } catch (_: Exception) { }
                             }
                         }) {
@@ -179,22 +202,22 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                 contentPadding = PaddingValues(bottom = 100.dp, top = 12.dp),
             ) {
                 item {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        MetricCard("Pool", eur(state.pool) + " €", BiColors.Gold, Modifier.weight(1f))
-                        MetricCard("Βήμα", "#" + state.cycleStep, BiColors.Green, Modifier.weight(1f))
-                    }
-                }
-                item {
                     val todayStake = state.bets.firstOrNull { it.resultWon == null }?.stake ?: state.levelStake
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        MetricCard("Pool", eur(state.pool) + " €", BiColors.Gold, Modifier.weight(1f))
                         MetricCard("Στοίχημα", eur(todayStake) + " €", BiColors.Text, Modifier.weight(1f))
-                        MetricCard("Level", eur(state.levelStake) + " €", BiColors.Loss, Modifier.weight(1f))
                     }
                 }
                 item {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        MetricCard("Level", eur(state.levelStake) + " €", BiColors.Loss, Modifier.weight(1f))
                         MetricCard("Max DD", eur(state.maxDrawdown) + " €", BiColors.Loss, Modifier.weight(1f))
+                    }
+                }
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         MetricCard("Base", eur(state.baseStake) + " €", BiColors.GoldDim, Modifier.weight(1f))
+                        MetricCard("Peak", eur(state.peakPool) + " €", BiColors.Green, Modifier.weight(1f))
                     }
                 }
                 item {
@@ -336,29 +359,42 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                             Column(Modifier.padding(14.dp)) {
                                 Text(bet.matchName, fontWeight = FontWeight.Bold, color = BiColors.Text)
                                 Text(
-                                    bet.tipDate + " · " + bet.market + " · βήμα #" + bet.cycleStep +
+                                    bet.tipDate + (bet.time?.let { " · $it" } ?: "") + " · " + bet.market +
                                         (if (bet.starOfDay) " · Σημείο" else ""),
                                     color = BiColors.TextMuted,
                                     fontSize = 12.sp,
                                 )
-                                bet.live?.takeIf { it.live || it.score != null || it.status.isNotBlank() }?.let { live ->
+                                if (LiveOverlay.shouldShow(bet.live)) {
+                                    val live = bet.live!!
                                     Spacer(Modifier.height(6.dp))
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (live.live) {
-                                            Box(
-                                                Modifier
-                                                    .background(BiColors.Loss, RoundedCornerShape(6.dp))
-                                                    .padding(horizontal = 8.dp, vertical = 3.dp),
-                                            ) {
-                                                Text("LIVE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                        when {
+                                            live.live -> {
+                                                Box(
+                                                    Modifier
+                                                        .background(BiColors.Loss, RoundedCornerShape(6.dp))
+                                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                                                ) {
+                                                    Text("LIVE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                                }
+                                                Spacer(Modifier.width(8.dp))
                                             }
-                                            Spacer(Modifier.width(8.dp))
+                                            live.final || live.status.contains("Final", true) || live.status == "FT" -> {
+                                                Box(
+                                                    Modifier
+                                                        .background(BiColors.Green.copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                                                ) {
+                                                    Text("FT", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                                }
+                                                Spacer(Modifier.width(8.dp))
+                                            }
                                         }
                                         Text(
-                                            listOfNotNull(live.score, live.status.takeIf { it.isNotBlank() }).joinToString(" · "),
-                                            color = if (live.live) BiColors.Loss else BiColors.TextMuted,
-                                            fontWeight = if (live.live) FontWeight.SemiBold else FontWeight.Normal,
-                                            fontSize = 12.sp,
+                                            LiveOverlay.label(live).ifBlank { live.status },
+                                            color = if (live.live) BiColors.Loss else BiColors.Text,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 13.sp,
                                         )
                                     }
                                 }

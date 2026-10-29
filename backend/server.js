@@ -122,7 +122,7 @@ async function hasPaidAccess(user) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.1' });
+  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.2' });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -183,8 +183,8 @@ app.get('/api/stats', async (_req, res) => {
 
 async function tipsWithLive(rows) {
   try {
-    const unsettled = rows.filter((t) => t.result_won === null || t.result_won === undefined);
-    const map = unsettled.length ? await liveScores.scoresForTips(unsettled) : {};
+    // Include settled tips too so FINAL scores remain visible on cards
+    const map = rows.length ? await liveScores.scoresForTips(rows) : {};
     return rows.map((t) => {
       const base = mapTipFull(t);
       const live = map[t.id];
@@ -502,8 +502,11 @@ async function syncMartingaleFromTips() {
 async function mgPublicWithLive(mg) {
   const pub = mgPublic(mg);
   try {
-    const unsettledTips = (await db.allTips()).filter((t) => t.result_won === null || t.result_won === undefined);
-    const map = unsettledTips.length ? await liveScores.scoresForTips(unsettledTips) : {};
+    const today = todayAthens();
+    const tips = (await db.allTips()).filter((t) =>
+      t.tip_date === today || t.result_won === null || t.result_won === undefined
+    );
+    const map = tips.length ? await liveScores.scoresForTips(tips) : {};
     pub.bets = pub.bets.map((b) => {
       const live = (b.tipId != null && map[b.tipId]) || null;
       return live ? { ...b, live } : b;
@@ -619,7 +622,7 @@ app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) =
 async function start() {
   if (db.ready) await db.ready();
   app.listen(PORT, () => {
-    console.log(`Tips API :${PORT} v0.7.1 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
+    console.log(`Tips API :${PORT} v0.7.2 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
   });
   // background live-score poll (ESPN public JSON, no key)
   const tick = async () => {

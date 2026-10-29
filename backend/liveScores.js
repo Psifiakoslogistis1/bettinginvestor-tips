@@ -135,6 +135,8 @@ function pushCompetition(out, comp, fallbackId) {
     rawAway: nameAway,
     scoreHome,
     scoreAway,
+    homeWinner: home?.winner === true,
+    awayWinner: away?.winner === true,
     state,
     detail: shortDetail || note || '',
     clock: stWrap.displayClock || '',
@@ -223,6 +225,8 @@ function matchTip(tip, events) {
     scoreAway: best.scoreAway,
     home: best.rawHome,
     away: best.rawAway,
+    homeWinner: !!best.homeWinner,
+    awayWinner: !!best.awayWinner,
     clock: best.clock,
     period: best.period,
     state: best.state,
@@ -250,27 +254,41 @@ function getCached(tipId) {
   return CACHE.byTipId.get(String(tipId)) || CACHE.byTipId.get(tipId) || null;
 }
 
-/** Infer tip result from final score vs market (ML / player). Conservative — only simple ML. */
+/** Infer tip result from final score vs market (ML / player). Supports tennis set-score strings via winner flags. */
 function inferResult(tip, live) {
-  if (!live || !live.final || live.scoreHome == null || live.scoreAway == null) return null;
-  const market = String(tip.market || tip.match_name || '').toLowerCase();
+  if (!live || !live.final) return null;
   const home = norm(live.home);
   const away = norm(live.away);
-  const sh = Number(live.scoreHome);
-  const sa = Number(live.scoreAway);
-  if (!Number.isFinite(sh) || !Number.isFinite(sa)) return null;
-  // ML: market contains team name
-  const homeWon = sh > sa;
-  const awayWon = sa > sh;
-  if (sh === sa) return null; // draw — skip auto
-  if (market.includes('ml') || market.includes('νίκη') || market.includes('1') || market.includes('2') || true) {
-    // pick side from market text vs home/away
-    const m = expand(market);
-    const picksHome = home.split(' ').filter((t) => t.length > 3).some((t) => m.includes(t)) || m.includes(home);
-    const picksAway = away.split(' ').filter((t) => t.length > 3).some((t) => m.includes(t)) || m.includes(away);
-    if (picksHome && !picksAway) return homeWon;
-    if (picksAway && !picksHome) return awayWon;
+  const m = expand(String(tip.market || tip.match_name || ''));
+  const picksHome = home.split(' ').filter((t) => t.length > 2).some((tok) => m.includes(tok)) || m.includes(home);
+  const picksAway = away.split(' ').filter((t) => t.length > 2).some((tok) => m.includes(tok)) || m.includes(away);
+  if (picksHome && picksAway) return null;
+  if (!picksHome && !picksAway) return null;
+
+  let homeWon = null;
+  if (live.homeWinner === true && live.awayWinner !== true) homeWon = true;
+  else if (live.awayWinner === true && live.homeWinner !== true) homeWon = false;
+  else {
+    const sh = Number(live.scoreHome);
+    const sa = Number(live.scoreAway);
+    if (Number.isFinite(sh) && Number.isFinite(sa) && sh !== sa) homeWon = sh > sa;
+    else {
+      // tennis note: "X bt Y" → X won
+      const note = norm(live.score || live.status || '');
+      if (home && note.includes(home.split(' ').filter((x) => x.length > 3).slice(-1)[0] || '###') && /\bbt\b/.test(note)) {
+        // crude: if note starts with away/home athlete
+      }
+      const bt = String(live.score || '').match(/(.+?)\s+bt\s+/i);
+      if (bt) {
+        const winnerName = expand(bt[1].replace(/^\(\d+\)\s*/, ''));
+        if (winnerName && home && (winnerName.includes(home.split(' ').pop()) || home.includes(winnerName.split(' ').pop()))) homeWon = true;
+        else if (winnerName && away && (winnerName.includes(away.split(' ').pop()) || away.includes(winnerName.split(' ').pop()))) homeWon = false;
+      }
+    }
   }
+  if (homeWon === null) return null;
+  if (picksHome) return homeWon;
+  if (picksAway) return !homeWon;
   return null;
 }
 

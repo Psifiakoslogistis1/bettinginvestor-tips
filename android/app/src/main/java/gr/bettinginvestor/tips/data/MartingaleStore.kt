@@ -9,6 +9,7 @@ import kotlin.math.max
 
 data class MartingaleBet(
     val id: Int,
+    val tipId: Int? = null,
     val tipDate: String,
     val matchName: String,
     val market: String,
@@ -107,6 +108,7 @@ object MartingaleStore {
         val level = o.optDouble("levelBefore", o.optDouble("cycleLossesBefore", baseStake))
         return MartingaleBet(
             id = o.getInt("id"),
+            tipId = if (o.has("tipId") && !o.isNull("tipId")) o.getInt("tipId") else null,
             tipDate = o.getString("tipDate"),
             matchName = o.getString("matchName"),
             market = o.getString("market"),

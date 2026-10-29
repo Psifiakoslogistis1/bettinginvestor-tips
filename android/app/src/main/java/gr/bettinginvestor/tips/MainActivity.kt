@@ -92,6 +92,7 @@ private enum class Tab { Star, Martingale, Info }
 @Composable
 private fun AppRoot(prefs: SharedPreferences) {
     var user by remember {
+        prefs.getString("api_token", null)?.let { ApiClient.token = it }
         val email = prefs.getString("email", "") ?: ""
         mutableStateOf(
             if (prefs.getBoolean("logged_in", false)) {
@@ -106,7 +107,7 @@ private fun AppRoot(prefs: SharedPreferences) {
         )
     }
     if (user == null) {
-        AuthScreen(onLoggedIn = { u ->
+        AuthScreen(prefs, onLoggedIn = { u ->
             prefs.edit()
                 .putBoolean("logged_in", true)
                 .putInt("uid", u.id)
@@ -118,6 +119,7 @@ private fun AppRoot(prefs: SharedPreferences) {
         })
     } else {
         MainTabs(user = user!!, prefs = prefs, onLogout = {
+            ApiClient.token = null
             prefs.edit().clear().apply()
             user = null
         })
@@ -136,7 +138,7 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
 )
 
 @Composable
-private fun AuthScreen(onLoggedIn: (User) -> Unit) {
+private fun AuthScreen(prefs: SharedPreferences, onLoggedIn: (User) -> Unit) {
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var modeRegister by remember { mutableStateOf(false) }
@@ -216,10 +218,12 @@ private fun AuthScreen(onLoggedIn: (User) -> Unit) {
                         try {
                             if (modeRegister) {
                                 if (name.isBlank()) { error = "Βάλε όνομα"; busy = false; return@launch }
-                                val (_, u) = ApiClient.register(name.trim(), e, p)
+                                val (tok, u) = ApiClient.register(name.trim(), e, p)
+                                prefs.edit().putString("api_token", tok).apply()
                                 onLoggedIn(u)
                             } else {
-                                val (_, u) = ApiClient.login(e, p)
+                                val (tok, u) = ApiClient.login(e, p)
+                                prefs.edit().putString("api_token", tok).apply()
                                 onLoggedIn(u)
                             }
                         } catch (_: Exception) {
@@ -327,19 +331,23 @@ private fun StarPage(user: User, onLogout: () -> Unit) {
     var tick by remember { mutableStateOf(0) }
     var liveMap by remember { mutableStateOf<Map<Int, LiveScore>>(emptyMap()) }
     var remoteStars by remember { mutableStateOf<List<Tip>?>(null) }
+    var liveError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         while (isActive) {
             try {
                 liveMap = ApiClient.liveScores(today)
                 remoteStars = ApiClient.tips(kind = "star").tips
-            } catch (_: Exception) { }
-            delay(45_000)
+                liveError = null
+            } catch (e: Exception) {
+                liveError = e.message?.take(80)
+            }
+            delay(20_000)
         }
     }
     val allStars = remember(tick, remoteStars) { remoteStars ?: LocalDemoStore.starTips(null) }
+    val byName = remember(liveMap, allStars) { LiveOverlay.nameIndexFromTips(allStars, liveMap) }
     val sortedStars = TipSort.tipsNewestFirst(allStars).map { tip ->
-        val live = tip.live ?: liveMap[tip.id]
-        if (live != null) tip.copy(live = live) else tip
+        LiveOverlay.forTip(tip, liveMap, byName)
     }
     val todayStars = sortedStars.filter { it.tipDate == today }
     val history = sortedStars.filter { it.tipDate != today }
@@ -364,7 +372,8 @@ private fun StarPage(user: User, onLogout: () -> Unit) {
                     Column {
                         Text("Σημείο Ημέρας", fontWeight = FontWeight.Bold, color = BiColors.Text)
                         Text(
-                            (if (user.isAdmin) "Admin · " else "") + "Stake 1€ / σημείο",
+                            (if (user.isAdmin) "Admin · " else "") + "Stake 1€ / σημείο" +
+                                (if (liveMap.isNotEmpty()) " · live ${liveMap.size}" else liveError?.let { " · $it" } ?: ""),
                             style = MaterialTheme.typography.bodySmall,
                             color = BiColors.TextMuted,
                         )
@@ -741,24 +750,37 @@ private fun PremiumTipCard(
                         Spacer(Modifier.height(6.dp))
                         StarOfDayBadge(compact = true)
                     }
-                    tip.live?.takeIf { it.live || (tip.resultWon == null && (it.score != null || it.status.isNotBlank())) }?.let { live ->
+                    if (LiveOverlay.shouldShow(tip.live)) {
+                        val live = tip.live!!
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (live.live) {
-                                Box(
-                                    Modifier
-                                        .background(BiColors.Loss, RoundedCornerShape(6.dp))
-                                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                                ) {
-                                    Text("LIVE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                            when {
+                                live.live -> {
+                                    Box(
+                                        Modifier
+                                            .background(BiColors.Loss, RoundedCornerShape(6.dp))
+                                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    ) {
+                                        Text("LIVE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    }
+                                    Spacer(Modifier.width(8.dp))
                                 }
-                                Spacer(Modifier.width(8.dp))
+                                live.final || live.status.contains("Final", ignoreCase = true) || live.status == "FT" -> {
+                                    Box(
+                                        Modifier
+                                            .background(BiColors.Green.copy(alpha = 0.85f), RoundedCornerShape(6.dp))
+                                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    ) {
+                                        Text("FT", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                }
                             }
                             Text(
-                                listOfNotNull(live.score, live.status.takeIf { it.isNotBlank() }).joinToString(" · "),
-                                color = if (live.live) BiColors.Loss else BiColors.TextMuted,
-                                fontWeight = if (live.live) FontWeight.SemiBold else FontWeight.Normal,
-                                fontSize = 12.sp,
+                                LiveOverlay.label(live).ifBlank { live.status },
+                                color = if (live.live) BiColors.Loss else BiColors.Text,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
                             )
                         }
                     }

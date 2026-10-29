@@ -93,8 +93,10 @@ class ApiException(message: String) : Exception(message)
 object ApiClient {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     private val http = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     @Volatile var baseUrl: String = BuildConfig.API_BASE_URL.trimEnd('/')
@@ -251,6 +253,7 @@ object ApiClient {
                 add(
                     MartingaleBet(
                         id = o.getInt("id"),
+                        tipId = if (o.has("tipId") && !o.isNull("tipId")) o.getInt("tipId") else null,
                         tipDate = o.getString("tipDate"),
                         matchName = o.getString("matchName"),
                         market = o.getString("market"),
@@ -332,6 +335,8 @@ object ApiClient {
     private fun parseUser(o: JSONObject) = User(
         id = o.getInt("id"), email = o.getString("email"), name = o.getString("name"), role = o.getString("role"),
     )
+
+    suspend fun health(): JSONObject = request("GET", "/api/health", authed = false)
 
     suspend fun liveScores(date: String? = null): Map<Int, LiveScore> {
         val path = if (date != null) "/api/live-scores?date=$date" else "/api/live-scores"
