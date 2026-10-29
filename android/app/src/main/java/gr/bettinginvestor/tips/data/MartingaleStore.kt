@@ -25,6 +25,7 @@ data class MartingaleBet(
     val lossMultiplier: Double = 10.0,
     val poolExceeded: Boolean = false,
     val time: String? = null,
+    val live: LiveScore? = null,
 )
 
 data class MartingaleState(
@@ -227,6 +228,37 @@ object MartingaleStore {
     }
 
     fun nextStakeExceedsPool(starOfDay: Boolean = false): Boolean = desiredStake(starOfDay) > pool + 1e-6
+
+
+    /** Append any missing tips (all daily + Σημείο) into Martingale, settle from tip results. */
+    fun syncFromTips(tips: List<Tip>) {
+        val chrono = tips.sortedWith(
+            compareBy<Tip> { it.tipDate }
+                .thenBy { TipSort.kickoffMinutes(it.tipTime) }
+                .thenBy { it.id },
+        )
+        for (t in chrono) {
+            val odds = t.odds ?: continue
+            val existing = bets.find {
+                it.matchName.equals(t.matchName, true) &&
+                    it.tipDate == t.tipDate &&
+                    it.market.equals(t.market, true)
+            }
+            if (existing == null) {
+                val bet = addPick(
+                    matchName = t.matchName,
+                    market = t.market,
+                    odds = odds,
+                    tipDate = t.tipDate,
+                    starOfDay = t.starOfDay,
+                    time = t.tipTime,
+                )
+                if (t.resultWon != null) settle(bet.id, t.resultWon)
+            } else if (existing.resultWon == null && t.resultWon != null) {
+                settle(existing.id, t.resultWon)
+            }
+        }
+    }
 
     private fun round2(v: Double): Double = Math.round(v * 100.0) / 100.0
 }

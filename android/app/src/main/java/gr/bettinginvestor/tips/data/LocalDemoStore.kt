@@ -86,6 +86,8 @@ object LocalDemoStore {
     fun isPaidUnlocked(isAdmin: Boolean): Boolean = isAdmin || paidUnlocked
     fun unlockPaid() { paidUnlocked = true }
 
+    fun allTips(): List<Tip> = TipSort.tipsNewestFirst(tips.map { it.copy(locked = false) })
+
     fun starTips(dateFilter: String? = null): List<Tip> {
         return tips.filter { it.starOfDay && (dateFilter == null || it.tipDate == dateFilter) }
             .let { TipSort.tipsNewestFirst(it) }

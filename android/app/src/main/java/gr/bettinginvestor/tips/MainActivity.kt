@@ -1,6 +1,8 @@
 package gr.bettinginvestor.tips
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.content.SharedPreferences
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -21,7 +23,9 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -37,8 +41,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import gr.bettinginvestor.tips.BuildConfig
 import gr.bettinginvestor.tips.data.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
 // MartingaleStore via wildcard
 import gr.bettinginvestor.tips.ui.BiColors
@@ -80,7 +87,7 @@ class MainActivity : ComponentActivity() {
 private val athens = ZoneId.of("Europe/Athens")
 private fun todayStr(): String = LocalDate.now(athens).format(DateTimeFormatter.ISO_LOCAL_DATE)
 
-private enum class Tab { Star, Paid, Martingale }
+private enum class Tab { Star, Martingale, Info }
 
 @Composable
 private fun AppRoot(prefs: SharedPreferences) {
@@ -130,6 +137,8 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
 
 @Composable
 private fun AuthScreen(onLoggedIn: (User) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
     var modeRegister by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -202,18 +211,33 @@ private fun AuthScreen(onLoggedIn: (User) -> Unit) {
                         error = "Συμπλήρωσε email και κωδικό"
                         return@Button
                     }
-                    // Offline demo only: admin role by email. Live API enforces password server-side.
-                    if (DemoAuth.isAdminEmail(e)) {
-                        onLoggedIn(User(1, e, "Evangelos", "admin"))
-                        return@Button
-                    }
-                    if (modeRegister) {
-                        if (name.isBlank()) { error = "Βάλε όνομα"; return@Button }
-                        onLoggedIn(User(2, e, name.trim(), "user"))
-                    } else {
-                        onLoggedIn(User(2, e, e.substringBefore("@").ifBlank { "Χρήστης" }, "user"))
+                    busy = true
+                    scope.launch {
+                        try {
+                            if (modeRegister) {
+                                if (name.isBlank()) { error = "Βάλε όνομα"; busy = false; return@launch }
+                                val (_, u) = ApiClient.register(name.trim(), e, p)
+                                onLoggedIn(u)
+                            } else {
+                                val (_, u) = ApiClient.login(e, p)
+                                onLoggedIn(u)
+                            }
+                        } catch (_: Exception) {
+                            // Offline / demo fallback
+                            if (DemoAuth.isAdminEmail(e)) {
+                                onLoggedIn(User(1, e, "Evangelos", "admin"))
+                            } else if (modeRegister) {
+                                if (name.isBlank()) { error = "Βάλε όνομα"; busy = false; return@launch }
+                                onLoggedIn(User(2, e, name.trim(), "user"))
+                            } else {
+                                onLoggedIn(User(2, e, e.substringBefore("@").ifBlank { "Χρήστης" }, "user"))
+                            }
+                        } finally {
+                            busy = false
+                        }
                     }
                 },
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = BiColors.Gold, contentColor = BiColors.Bg),
@@ -222,7 +246,7 @@ private fun AuthScreen(onLoggedIn: (User) -> Unit) {
                 Text(if (modeRegister) "Έχεις λογαριασμό; Σύνδεση" else "Νέος χρήστης; Εγγραφή", color = BiColors.Gold)
             }
             Text(
-                "Admin: bettinginvestor@hotmail.com\nΣελίδα 1 δωρεάν · Σελίδα 2 με πάσο 0,50€",
+                "Σημείο Ημέρας δωρεάν · Martingale 0,50€/ημέρα",
                 style = MaterialTheme.typography.bodySmall,
                 color = BiColors.TextMuted,
                 textAlign = TextAlign.Center,
@@ -234,6 +258,7 @@ private fun AuthScreen(onLoggedIn: (User) -> Unit) {
 @Composable
 private fun MainTabs(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
     var tab by remember { mutableStateOf(Tab.Star) }
+    val mgUnlocked = user.isAdmin || LocalDemoStore.isPaidUnlocked(false) || prefs.getBoolean("paid_unlocked", false)
     Scaffold(
         bottomBar = {
             NavigationBar(
@@ -244,20 +269,7 @@ private fun MainTabs(user: User, prefs: SharedPreferences, onLogout: () -> Unit)
                     selected = tab == Tab.Star,
                     onClick = { tab = Tab.Star },
                     icon = { Icon(Icons.Default.EmojiEvents, null) },
-                    label = { Text("Επιλογές") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = BiColors.Gold,
-                        selectedTextColor = BiColors.Gold,
-                        indicatorColor = BiColors.Gold.copy(alpha = 0.15f),
-                        unselectedIconColor = BiColors.TextMuted,
-                        unselectedTextColor = BiColors.TextMuted,
-                    ),
-                )
-                NavigationBarItem(
-                    selected = tab == Tab.Paid,
-                    onClick = { tab = Tab.Paid },
-                    icon = { Icon(if (user.isAdmin || LocalDemoStore.isPaidUnlocked(false)) Icons.Default.LockOpen else Icons.Default.Lock, null) },
-                    label = { Text("Ημερήσια") },
+                    label = { Text("Σημείο") },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = BiColors.Gold,
                         selectedTextColor = BiColors.Gold,
@@ -269,8 +281,21 @@ private fun MainTabs(user: User, prefs: SharedPreferences, onLogout: () -> Unit)
                 NavigationBarItem(
                     selected = tab == Tab.Martingale,
                     onClick = { tab = Tab.Martingale },
-                    icon = { Icon(Icons.Default.TrendingUp, null) },
+                    icon = { Icon(if (mgUnlocked) Icons.Default.TrendingUp else Icons.Default.Lock, null) },
                     label = { Text("Martingale") },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = BiColors.Gold,
+                        selectedTextColor = BiColors.Gold,
+                        indicatorColor = BiColors.Gold.copy(alpha = 0.15f),
+                        unselectedIconColor = BiColors.TextMuted,
+                        unselectedTextColor = BiColors.TextMuted,
+                    ),
+                )
+                NavigationBarItem(
+                    selected = tab == Tab.Info,
+                    onClick = { tab = Tab.Info },
+                    icon = { Icon(Icons.Default.Info, null) },
+                    label = { Text("Πληροφορίες") },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = BiColors.Gold,
                         selectedTextColor = BiColors.Gold,
@@ -286,8 +311,8 @@ private fun MainTabs(user: User, prefs: SharedPreferences, onLogout: () -> Unit)
         Box(Modifier.padding(padding)) {
             when (tab) {
                 Tab.Star -> StarPage(user, onLogout)
-                Tab.Paid -> PaidPage(user, prefs, onLogout)
                 Tab.Martingale -> MartingalePage(user, prefs, onLogout)
+                Tab.Info -> InfoPage(onLogout)
             }
         }
     }
@@ -301,14 +326,21 @@ private fun StarPage(user: User, onLogout: () -> Unit) {
     var editing by remember { mutableStateOf<Tip?>(null) }
     var tick by remember { mutableStateOf(0) }
     var liveMap by remember { mutableStateOf<Map<Int, LiveScore>>(emptyMap()) }
+    var remoteStars by remember { mutableStateOf<List<Tip>?>(null) }
     LaunchedEffect(Unit) {
         while (isActive) {
-            try { liveMap = ApiClient.liveScores(today) } catch (_: Exception) { }
+            try {
+                liveMap = ApiClient.liveScores(today)
+                remoteStars = ApiClient.tips(kind = "star").tips
+            } catch (_: Exception) { }
             delay(45_000)
         }
     }
-    val allStars = remember(tick) { LocalDemoStore.starTips(null) }
-    val sortedStars = TipSort.tipsNewestFirst(allStars).map { t -> liveMap[t.id]?.let { t.copy(live = it) } ?: t }
+    val allStars = remember(tick, remoteStars) { remoteStars ?: LocalDemoStore.starTips(null) }
+    val sortedStars = TipSort.tipsNewestFirst(allStars).map { tip ->
+        val live = tip.live ?: liveMap[tip.id]
+        if (live != null) tip.copy(live = live) else tip
+    }
     val todayStars = sortedStars.filter { it.tipDate == today }
     val history = sortedStars.filter { it.tipDate != today }
     val stats = remember(tick) { LocalDemoStore.starStats() }
@@ -330,7 +362,7 @@ private fun StarPage(user: User, onLogout: () -> Unit) {
             TopAppBar(
                 title = {
                     Column {
-                        Text("Επιλογές Ημέρας", fontWeight = FontWeight.Bold, color = BiColors.Text)
+                        Text("Σημείο Ημέρας", fontWeight = FontWeight.Bold, color = BiColors.Text)
                         Text(
                             (if (user.isAdmin) "Admin · " else "") + "Stake 1€ / σημείο",
                             style = MaterialTheme.typography.bodySmall,
@@ -361,9 +393,9 @@ private fun StarPage(user: User, onLogout: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(bottom = 100.dp, top = 12.dp),
         ) {
-            item { SectionHeader("Σημερινή επιλογή", today) }
+            item { SectionHeader("Σημείο Ημέρας", today) }
             if (todayStars.isEmpty()) {
-                item { EmptyHint("Δεν έχει αναρτηθεί ακόμα Σημείο Ημέρας.") }
+                item { EmptyHint("Δεν έχει αναρτηθεί ακόμα το Σημείο Ημέρας.") }
             } else {
                 items(todayStars, key = { "t-${it.id}" }) { tip ->
                     PremiumTipCard(
@@ -545,6 +577,107 @@ private fun PaidPage(user: User, prefs: SharedPreferences, onLogout: () -> Unit)
     }
 }
 
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InfoPage(onLogout: () -> Unit) {
+    val context = LocalContext.current
+    var serverStatus by remember { mutableStateOf("Έλεγχος…") }
+    LaunchedEffect(Unit) {
+        serverStatus = try {
+            val map = ApiClient.liveScores()
+            val health = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                // lightweight: reuse live-scores date as reachability; health via tips star
+                ApiClient.tips(kind = "star")
+            }
+            "Online · tips ${health.tips.size} · scores ${map.size} · today ${health.today}"
+        } catch (e: Exception) {
+            "Offline / σφάλμα: ${e.message?.take(80) ?: "άγνωστο"}"
+        }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("Πληροφορίες", fontWeight = FontWeight.Bold, color = BiColors.Text)
+                        Text("BettingInvestor Tips", style = MaterialTheme.typography.bodySmall, color = BiColors.TextMuted)
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onLogout) { Icon(Icons.AutoMirrored.Filled.Logout, null, tint = BiColors.Gold) }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = BiColors.BgElevated),
+            )
+        },
+        containerColor = BiColors.Bg,
+    ) { padding ->
+        LazyColumn(
+            Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(bottom = 100.dp, top = 12.dp),
+        ) {
+            item { SectionHeader("Τιμοκατάλογος", null) }
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = BiColors.Card),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, BiColors.Stroke.copy(alpha = 0.6f), RoundedCornerShape(18.dp)),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Σημείο Ημέρας", fontWeight = FontWeight.Bold, color = BiColors.Gold)
+                        Text("Δωρεάν — η επιλογή της ημέρας με ιστορικό και στατιστικά (stake 1€).", color = BiColors.TextMuted)
+                        Spacer(Modifier.height(4.dp))
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(BiColors.Stroke.copy(alpha = 0.5f)))
+                        Spacer(Modifier.height(4.dp))
+                        Text("Martingale", fontWeight = FontWeight.Bold, color = BiColors.Gold)
+                        Text("0,50€ / ημέρα — όλες οι επιλογές (ημερήσια + Σημείο Ημέρας), live σκορ, pool & progression.", color = BiColors.TextMuted)
+                    }
+                }
+            }
+            item { SectionHeader("Version", null) }
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = BiColors.Card),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, BiColors.Stroke.copy(alpha = 0.6f), RoundedCornerShape(18.dp)),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("App ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", fontWeight = FontWeight.SemiBold, color = BiColors.Text)
+                        Text("API: ${BuildConfig.API_BASE_URL}", color = BiColors.TextMuted, fontSize = 12.sp)
+                        Text(serverStatus, color = BiColors.TextMuted, fontSize = 12.sp)
+                    }
+                }
+            }
+            item { SectionHeader("Support", null) }
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = BiColors.Card),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth().border(1.dp, BiColors.Stroke.copy(alpha = 0.6f), RoundedCornerShape(18.dp)),
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Επικοινωνία", fontWeight = FontWeight.Bold, color = BiColors.Text)
+                        Text("bettinginvestor@hotmail.com", color = BiColors.TextMuted)
+                        Button(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_SENDTO).apply {
+                                    data = Uri.parse("mailto:bettinginvestor@hotmail.com")
+                                    putExtra(Intent.EXTRA_SUBJECT, "BettingInvestor Tips")
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Email"))
+                            },
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = BiColors.Gold, contentColor = BiColors.Bg),
+                        ) { Text("Αποστολή email", fontWeight = FontWeight.Bold) }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SectionHeader(title: String, subtitle: String?) {
     Column(Modifier.padding(top = 4.dp, bottom = 2.dp)) {
@@ -608,7 +741,7 @@ private fun PremiumTipCard(
                         Spacer(Modifier.height(6.dp))
                         StarOfDayBadge(compact = true)
                     }
-                    tip.live?.takeIf { it.live || (it.score != null && tip.resultWon == null) }?.let { live ->
+                    tip.live?.takeIf { it.live || (tip.resultWon == null && (it.score != null || it.status.isNotBlank())) }?.let { live ->
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (live.live) {

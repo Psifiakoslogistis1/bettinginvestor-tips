@@ -68,6 +68,12 @@ const ALIASES = {
   'pelicans': 'new orleans pelicans',
   'portland': 'portland trail blazers',
   'memphis': 'memphis grizzlies',
+  'lehecka': 'jiri lehecka',
+  'altmaier': 'daniel altmaier',
+  'djokovic': 'novak djokovic',
+  'struff': 'jan-lennard struff',
+  'shelton': 'ben shelton',
+  'kym': 'jerome kym',
 };
 
 function expand(n) {
@@ -79,46 +85,76 @@ function expand(n) {
 }
 
 function splitMatch(matchName) {
-  const raw = String(matchName || '');
+  const raw = String(matchName || '').replace(/\([^)]*\)/g, ' ').trim();
   const parts = raw.split(/\s+@\s+|\s+[–—-]\s+/);
   if (parts.length >= 2) return [expand(parts[0]), expand(parts[1])];
   return [expand(raw), ''];
+}
+
+function competitorName(c) {
+  return c?.team?.displayName || c?.athlete?.displayName || c?.team?.shortDisplayName
+    || c?.athlete?.shortName || c?.athlete?.fullName || '';
+}
+
+function linescoreText(competitor) {
+  const ls = competitor?.linescores || [];
+  if (!ls.length) return competitor?.score != null ? String(competitor.score) : null;
+  return ls.map((s) => {
+    const v = s.value != null ? String(Math.trunc(s.value)) : '0';
+    return s.tiebreak != null ? `${v}(${s.tiebreak})` : v;
+  }).join('-');
+}
+
+function pushCompetition(out, comp, fallbackId) {
+  if (!comp) return;
+  const competitors = comp.competitors || [];
+  if (!competitors.length) return;
+  const home = competitors.find((c) => c.homeAway === 'home') || competitors[1] || competitors[0];
+  const away = competitors.find((c) => c.homeAway === 'away') || competitors[0];
+  const stWrap = comp.status || {};
+  const status = stWrap.type || {};
+  const state = status.state || '';
+  const shortDetail = status.shortDetail || status.detail || '';
+  const nameHome = competitorName(home);
+  const nameAway = competitorName(away);
+  if (!nameHome && !nameAway) return;
+  let scoreHome = home?.score != null ? String(home.score) : null;
+  let scoreAway = away?.score != null ? String(away.score) : null;
+  // tennis: prefer set linescores as readable score string pieces
+  const lsHome = linescoreText(home);
+  const lsAway = linescoreText(away);
+  if ((scoreHome == null || scoreHome === '') && lsHome) scoreHome = lsHome;
+  if ((scoreAway == null || scoreAway === '') && lsAway) scoreAway = lsAway;
+  const note = ((comp.notes || [])[0] || {}).text || '';
+  out.push({
+    id: comp.id || fallbackId,
+    name: note || `${nameAway} at ${nameHome}`,
+    nameHome: expand(nameHome),
+    nameAway: expand(nameAway),
+    rawHome: nameHome,
+    rawAway: nameAway,
+    scoreHome,
+    scoreAway,
+    state,
+    detail: shortDetail || note || '',
+    clock: stWrap.displayClock || '',
+    period: stWrap.period,
+    completed: !!status.completed,
+  });
 }
 
 function parseEvents(data) {
   const out = [];
   const events = data.events || [];
   for (const ev of events) {
-    const comp = (ev.competitions || [])[0] || {};
-    const competitors = comp.competitors || [];
-    const home = competitors.find((c) => c.homeAway === 'home') || competitors[1];
-    const away = competitors.find((c) => c.homeAway === 'away') || competitors[0];
-    const status = (ev.status || {}).type || {};
-    const detail = (ev.status || {}).type?.detail || status.detail || '';
-    const state = status.state || ''; // pre | in | post
-    const shortDetail = status.shortDetail || detail;
-    const clock = (ev.status || {}).displayClock || '';
-    const period = (ev.status || {}).period;
-    let scoreHome = home?.score != null ? String(home.score) : null;
-    let scoreAway = away?.score != null ? String(away.score) : null;
-    // tennis may use linescores differently
-    const nameHome = home?.team?.displayName || home?.athlete?.displayName || home?.team?.shortDisplayName || '';
-    const nameAway = away?.team?.displayName || away?.athlete?.displayName || away?.team?.shortDisplayName || '';
-    out.push({
-      id: ev.id,
-      name: ev.name || `${nameAway} at ${nameHome}`,
-      nameHome: expand(nameHome),
-      nameAway: expand(nameAway),
-      rawHome: nameHome,
-      rawAway: nameAway,
-      scoreHome,
-      scoreAway,
-      state, // pre, in, post
-      detail: shortDetail || detail,
-      clock,
-      period,
-      completed: !!status.completed,
-    });
+    const topComps = ev.competitions || [];
+    if (topComps.length) {
+      for (const comp of topComps) pushCompetition(out, comp, ev.id);
+    }
+    // Tennis (and some nested boards): matches live under groupings[].competitions
+    for (const g of ev.groupings || []) {
+      for (const comp of g.competitions || []) pushCompetition(out, comp, `${ev.id}-${comp.id}`);
+    }
   }
   return out;
 }
@@ -169,9 +205,14 @@ function matchTip(tip, events) {
   }
   const live = best.state === 'in';
   const final_ = best.state === 'post' || best.completed;
-  const score = (best.scoreAway != null && best.scoreHome != null)
-    ? `${best.rawAway} ${best.scoreAway}–${best.scoreHome} ${best.rawHome}`
-    : null;
+  let score = null;
+  if (best.scoreAway != null && best.scoreHome != null) {
+    score = `${best.rawAway} ${best.scoreAway} – ${best.rawHome} ${best.scoreHome}`;
+  }
+  // Prefer human tennis note when present (cleaner set scores)
+  if (best.name && /\bbt\b|tied with|leads/i.test(best.name)) {
+    score = best.name;
+  }
   return {
     tipId: tip.id,
     live,

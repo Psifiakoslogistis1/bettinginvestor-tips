@@ -201,9 +201,13 @@ object ApiClient {
         )
     }
 
-    suspend fun tips(date: String): TipsResponse {
-        val json = request("GET", "/api/tips?date=$date", authed = false)
-        val arr = json.getJSONArray("tips")
+    suspend fun tips(kind: String = "star", date: String? = null): TipsResponse {
+        val q = buildString {
+            append("/api/tips?kind=").append(kind)
+            if (date != null) append("&date=").append(date)
+        }
+        val json = request("GET", q, authed = false)
+        val arr = json.optJSONArray("tips") ?: JSONArray()
         val list = buildList {
             for (i in 0 until arr.length()) add(parseTip(arr.getJSONObject(i)))
         }
@@ -220,15 +224,67 @@ object ApiClient {
             )
         }
         return TipsResponse(
-            tipDate = json.getString("tipDate"),
+            tipDate = json.optString("tipDate", date ?: ""),
             today = json.optString("today"),
             isToday = json.optBoolean("isToday"),
             isPast = json.optBoolean("isPast"),
-            dayUnlocked = json.optBoolean("dayUnlocked"),
+            dayUnlocked = json.optBoolean("dayUnlocked", true),
             lockedCount = json.optInt("lockedCount"),
             tips = list,
             system = sys,
             dailyPassEur = json.optDouble("dailyPassEur", 0.5),
+        )
+    }
+
+    suspend fun martingale(): MartingaleState {
+        val json = request("GET", "/api/martingale")
+        return parseMartingale(json)
+    }
+
+    suspend fun unlockStubToday(tipDate: String): JSONObject = unlockStub(tipDate)
+
+    private fun parseMartingale(json: JSONObject): MartingaleState {
+        val arr = json.optJSONArray("bets") ?: JSONArray()
+        val bets = buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                add(
+                    MartingaleBet(
+                        id = o.getInt("id"),
+                        tipDate = o.getString("tipDate"),
+                        matchName = o.getString("matchName"),
+                        market = o.getString("market"),
+                        odds = o.getDouble("odds"),
+                        stake = o.getDouble("stake"),
+                        desiredStake = o.optDouble("desiredStake", o.getDouble("stake")),
+                        resultWon = if (o.isNull("resultWon")) null else o.getBoolean("resultWon"),
+                        profit = if (o.has("profit") && !o.isNull("profit")) o.getDouble("profit") else null,
+                        poolAfter = if (o.has("poolAfter") && !o.isNull("poolAfter")) o.getDouble("poolAfter") else null,
+                        cycleStep = o.optInt("cycleStep", 1),
+                        levelBefore = o.optDouble("levelBefore", o.optDouble("cycleLossesBefore", 25.0)),
+                        starOfDay = o.optBoolean("starOfDay", false),
+                        starMultiplierApplied = o.optDouble("starMultiplierApplied", 1.0),
+                        lossMultiplier = o.optDouble("lossMultiplier", 10.0),
+                        poolExceeded = o.optBoolean("poolExceeded", false),
+                        time = if (o.has("time") && !o.isNull("time")) o.optString("time") else null,
+                        live = if (o.has("live") && !o.isNull("live")) parseLive(o.getJSONObject("live")) else null,
+                    )
+                )
+            }
+        }
+        return MartingaleState(
+            pool = json.optDouble("pool"),
+            baseStake = json.optDouble("baseStake", 25.0),
+            starMultiplier = json.optDouble("starMultiplier", 2.0),
+            lossMultiplier = json.optDouble("lossMultiplier", 10.0),
+            levelStake = json.optDouble("levelStake", json.optDouble("cycleLosses", 25.0)),
+            cycleStep = json.optInt("cycleStep", 1),
+            nextStakeHint = null,
+            maxDrawdown = json.optDouble("maxDrawdown"),
+            peakPool = json.optDouble("peakPool"),
+            startingPool = json.optDouble("startingPool", 1000.0),
+            ruleSummary = json.optString("ruleSummary", MartingaleStore.RULE_SUMMARY),
+            bets = bets,
         )
     }
 

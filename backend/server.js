@@ -122,7 +122,7 @@ async function hasPaidAccess(user) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.0' });
+  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.1' });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -278,6 +278,7 @@ app.post('/api/tips', auth, adminOnly, async (req, res) => {
     match_name: matchName, market, odds, analysis, tip_date: tipDate, tip_time: tipTime,
     sport, pick_type: pickType, star_of_day: starOfDay, stake, created_by: req.user.id,
   });
+  try { await syncMartingaleFromTips(); } catch (e) { console.warn('[mg-sync]', e.message); }
   res.status(201).json(mapTipFull(tip));
 });
 
@@ -302,7 +303,9 @@ app.put('/api/tips/:id', auth, adminOnly, async (req, res) => {
   }
   if (req.body.resultDetail !== undefined) patch.result_detail = req.body.resultDetail;
   if (req.body.profit !== undefined) patch.profit = req.body.profit;
-  res.json(mapTipFull(await db.updateTip(id, patch)));
+  const updated = await db.updateTip(id, patch);
+  try { await syncMartingaleFromTips(); } catch (e) { console.warn('[mg-sync]', e.message); }
+  res.json(mapTipFull(updated));
 });
 
 
@@ -328,6 +331,7 @@ app.get('/api/live-scores', optionalAuth, async (req, res) => {
       live.autoSettled = inferred;
     }
   }
+  try { await syncMartingaleFromTips(); } catch (e) { console.warn('[mg-sync]', e.message); }
   res.json({ date: tipDate, updatedAt: new Date().toISOString(), pollSeconds: 60, scores: map });
 });
 
@@ -406,12 +410,116 @@ function mgPublic(mg) {
   };
 }
 
+
+function mgTipKey(t) {
+  return `${t.tip_date || t.tipDate}|${String(t.match_name || t.matchName || '').trim().toLowerCase()}|${String(t.market || '').trim().toLowerCase()}`;
+}
+function mgBetKey(b) {
+  return `${b.tipDate}|${String(b.matchName || '').trim().toLowerCase()}|${String(b.market || '').trim().toLowerCase()}`;
+}
+function mgApplySettle(mg, bet, won) {
+  if (bet.resultWon !== null && bet.resultWon !== undefined) return;
+  const profit = won ? mgRound(bet.stake * (bet.odds - 1)) : mgRound(-bet.stake);
+  mg.pool = mgRound(mg.pool + profit);
+  mg.peakPool = Math.max(mg.peakPool, mg.pool);
+  mg.maxDrawdown = Math.max(mg.maxDrawdown, mgRound(mg.peakPool - mg.pool));
+  const levelBefore = Number(bet.levelBefore != null ? bet.levelBefore : mg.levelStake);
+  if (won) {
+    mg.levelStake = mg.baseStake;
+    mg.cycleLosses = mg.baseStake;
+    mg.cycleStep = 1;
+  } else {
+    mg.levelStake = mgRound(levelBefore * mg.lossMultiplier);
+    mg.cycleLosses = mg.levelStake;
+    mg.cycleStep += 1;
+  }
+  bet.resultWon = won;
+  bet.profit = profit;
+  bet.poolAfter = mg.pool;
+}
+
+/** Ensure every published tip (incl. Σημείο Ημέρας) is a Martingale bet; settle from tip results. */
+async function syncMartingaleFromTips() {
+  const mg = mgNorm(await db.getMartingale());
+  if (!mg.bets) mg.bets = [];
+  const tips = await db.allTips();
+  const chrono = [...tips].sort((a, b) => {
+    const da = String(a.tip_date || '').localeCompare(String(b.tip_date || ''));
+    if (da) return da;
+    const ta = parseKickoffMinutes(a.tip_time);
+    const tb = parseKickoffMinutes(b.tip_time);
+    if (ta !== tb) return ta - tb;
+    return (a.id || 0) - (b.id || 0);
+  });
+  let changed = false;
+  for (const t of chrono) {
+    const key = mgTipKey(t);
+    let bet = mg.bets.find((b) => b.tipId === t.id || mgBetKey(b) === key);
+    const settled = t.result_won !== null && t.result_won !== undefined;
+    if (!bet) {
+      const star = !!t.star_of_day;
+      const { desired, stake, poolExceeded, levelBefore, starMultiplierApplied } = mgComputeStake(mg, star);
+      if (stake <= 0 && !settled) continue;
+      bet = {
+        id: await db.nextMgId(),
+        tipId: t.id,
+        tipDate: t.tip_date,
+        matchName: t.match_name,
+        market: t.market,
+        odds: t.odds,
+        stake: stake > 0 ? stake : mgRound(Math.min(desired, Math.max(mg.pool, 0))),
+        desiredStake: desired,
+        resultWon: null,
+        profit: null,
+        poolAfter: null,
+        cycleStep: mg.cycleStep,
+        levelBefore,
+        cycleLossesBefore: levelBefore,
+        starOfDay: star,
+        starMultiplierApplied,
+        lossMultiplier: mg.lossMultiplier,
+        poolExceeded,
+        time: t.tip_time || null,
+      };
+      mg.bets.push(bet);
+      changed = true;
+      if (settled) {
+        mgApplySettle(mg, bet, !!t.result_won);
+      }
+    } else {
+      if (bet.tipId == null) { bet.tipId = t.id; changed = true; }
+      if (bet.time == null && t.tip_time) { bet.time = t.tip_time; changed = true; }
+      if ((bet.resultWon === null || bet.resultWon === undefined) && settled) {
+        mgApplySettle(mg, bet, !!t.result_won);
+        changed = true;
+      }
+    }
+  }
+  if (changed) await db.saveMartingale(mg);
+  return mg;
+}
+
+async function mgPublicWithLive(mg) {
+  const pub = mgPublic(mg);
+  try {
+    const unsettledTips = (await db.allTips()).filter((t) => t.result_won === null || t.result_won === undefined);
+    const map = unsettledTips.length ? await liveScores.scoresForTips(unsettledTips) : {};
+    pub.bets = pub.bets.map((b) => {
+      const live = (b.tipId != null && map[b.tipId]) || null;
+      return live ? { ...b, live } : b;
+    });
+  } catch (_) { /* ignore */ }
+  return pub;
+}
+
+
 app.get('/api/martingale', auth, async (req, res) => {
   const user = await db.getUserById(req.user.id);
   if (!(user.role === 'admin' || await db.hasUnlock(user.id, todayAthens()))) {
-    return res.status(402).json({ error: 'Απαιτείται ημερήσιο πάσο 0,50€', paywall: true });
+    return res.status(402).json({ error: 'Απαιτείται ημερήσιο πάσο 0,50€ για Martingale (όλες οι επιλογές)', paywall: true, dailyPassEur: DAILY_PASS_EUR });
   }
-  res.json(mgPublic(await db.getMartingale()));
+  const mg = await syncMartingaleFromTips();
+  res.json(await mgPublicWithLive(mg));
 });
 
 app.put('/api/martingale/settings', auth, adminOnly, async (req, res) => {
@@ -511,7 +619,7 @@ app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) =
 async function start() {
   if (db.ready) await db.ready();
   app.listen(PORT, () => {
-    console.log(`Tips API :${PORT} v0.7.0 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
+    console.log(`Tips API :${PORT} v0.7.1 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
   });
   // background live-score poll (ESPN public JSON, no key)
   const tick = async () => {
@@ -519,6 +627,7 @@ async function start() {
       const today = todayAthens();
       const rows = (await db.allTips()).filter((t) => t.tip_date === today || t.result_won === null || t.result_won === undefined);
       await liveScores.scoresForTips(rows.slice(0, 80));
+      await syncMartingaleFromTips();
     } catch (e) { console.warn('[live]', e.message); }
   };
   tick();

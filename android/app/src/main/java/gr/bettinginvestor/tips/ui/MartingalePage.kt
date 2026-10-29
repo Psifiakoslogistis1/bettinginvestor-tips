@@ -64,7 +64,15 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import gr.bettinginvestor.tips.data.ApiClient
 import gr.bettinginvestor.tips.data.LocalDemoStore
+import gr.bettinginvestor.tips.data.MartingaleBet
+import gr.bettinginvestor.tips.data.MartingaleState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import gr.bettinginvestor.tips.data.MartingaleStore
 import gr.bettinginvestor.tips.data.User
 import java.util.Locale
@@ -83,9 +91,34 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
     var starMultInput by remember { mutableStateOf(MartingaleStore.starMultiplier().toString()) }
     var lossMultInput by remember { mutableStateOf(MartingaleStore.lossMultiplier().toString()) }
     var showResetConfirm by remember { mutableStateOf(false) }
+    var remote by remember { mutableStateOf<MartingaleState?>(null) }
+    val scope = rememberCoroutineScope()
 
-    val state = remember(tick) { MartingaleStore.state() }
-    val history = remember(tick) { MartingaleStore.poolHistory() }
+    LaunchedEffect(unlocked) {
+        if (!unlocked) return@LaunchedEffect
+        while (isActive) {
+            MartingaleStore.syncFromTips(LocalDemoStore.allTips())
+            try {
+                if (ApiClient.token != null) remote = ApiClient.martingale()
+            } catch (_: Exception) { }
+            delay(45_000)
+        }
+    }
+
+    // Force local recompute when tick changes; prefer remote when available
+    val localState = remember(tick) {
+        MartingaleStore.syncFromTips(LocalDemoStore.allTips())
+        MartingaleStore.state()
+    }
+    val state = remote ?: localState
+    val history = remember(tick, remote) {
+        val s = remote
+        if (s != null) {
+            listOf(s.startingPool) + s.bets.filter { it.poolAfter != null }.sortedBy { it.id }.mapNotNull { it.poolAfter }
+        } else {
+            MartingaleStore.poolHistory()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -103,7 +136,12 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                 },
                 actions = {
                     if (unlocked) {
-                        IconButton(onClick = { tick++ }) {
+                        IconButton(onClick = {
+                            tick++
+                            scope.launch {
+                                try { if (ApiClient.token != null) remote = ApiClient.martingale() } catch (_: Exception) { }
+                            }
+                        }) {
                             Icon(Icons.Default.Refresh, contentDescription = null, tint = BiColors.Gold)
                         }
                     }
@@ -303,6 +341,27 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                                     color = BiColors.TextMuted,
                                     fontSize = 12.sp,
                                 )
+                                bet.live?.takeIf { it.live || it.score != null || it.status.isNotBlank() }?.let { live ->
+                                    Spacer(Modifier.height(6.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (live.live) {
+                                            Box(
+                                                Modifier
+                                                    .background(BiColors.Loss, RoundedCornerShape(6.dp))
+                                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                            ) {
+                                                Text("LIVE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                            }
+                                            Spacer(Modifier.width(8.dp))
+                                        }
+                                        Text(
+                                            listOfNotNull(live.score, live.status.takeIf { it.isNotBlank() }).joinToString(" · "),
+                                            color = if (live.live) BiColors.Loss else BiColors.TextMuted,
+                                            fontWeight = if (live.live) FontWeight.SemiBold else FontWeight.Normal,
+                                            fontSize = 12.sp,
+                                        )
+                                    }
+                                }
                                 Spacer(Modifier.height(6.dp))
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Box(
@@ -434,10 +493,10 @@ private fun Paywall(padding: PaddingValues, onUnlock: () -> Unit) {
         }
         Spacer(Modifier.height(20.dp))
         Text("Martingale", style = MaterialTheme.typography.headlineSmall, color = BiColors.Text, fontWeight = FontWeight.Bold)
-        Text("0,50€ ημερήσιο πάσο", color = BiColors.Gold, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+        Text("0,50€ / ημέρα", color = BiColors.Gold, fontWeight = FontWeight.Bold, fontSize = 22.sp)
         Spacer(Modifier.height(12.dp))
         Text(
-            "Ξεκλείδωσε το progression tracker (pool 1000€, recovery stakes, ιστορικό, chart).",
+            "Ξεκλείδωσε όλες τις επιλογές (ημερήσια + Σημείο Ημέρας), live σκορ, pool 1000€, stakes & ιστορικό.\nΤο Σημείο Ημέρας μένει δωρεάν στην ομώνυμη καρτέλα.",
             textAlign = TextAlign.Center,
             color = BiColors.TextMuted,
         )

@@ -6,9 +6,11 @@ services:
     rootDir: backend
     buildCommand: npm install
     startCommand: npm start
+    disk:
+      name: tips-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
-      - key: NODE_VERSION
-        value: "20"
       - key: JWT_SECRET
         generateValue: true
       - key: STUB_BILLING
@@ -17,12 +19,7 @@ services:
         value: bettinginvestor@hotmail.com
       - key: ADMIN_PASSWORD
         sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: tips-app-db
-          property: connectionString
-databases:
-  - name: tips-app-db
-    plan: free
-    region: frankfurt
-    postgresMajorVersion: "16"
+      - key: DATA_DIR
+        value: /var/data
+      - key: NODE_VERSION
+        value: "20"
