@@ -1,0 +1,70 @@
+{
+  "totalExcel": 35,
+  "totalAppBefore": 35,
+  "perDate": [
+    {
+      "date": "2026-10-23",
+      "excelCount": 6,
+      "appCountBefore": 6,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    },
+    {
+      "date": "2026-10-24",
+      "excelCount": 6,
+      "appCountBefore": 6,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    },
+    {
+      "date": "2026-10-25",
+      "excelCount": 6,
+      "appCountBefore": 6,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    },
+    {
+      "date": "2026-10-26",
+      "excelCount": 4,
+      "appCountBefore": 4,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    },
+    {
+      "date": "2026-10-27",
+      "excelCount": 4,
+      "appCountBefore": 4,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    },
+    {
+      "date": "2026-10-28",
+      "excelCount": 5,
+      "appCountBefore": 5,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    },
+    {
+      "date": "2026-10-29",
+      "excelCount": 4,
+      "appCountBefore": 4,
+      "starsExcel": 1,
+      "starsAppBefore": 1,
+      "missing": [],
+      "mismatches": []
+    }
+  ],
+  "systems": 6
+}
