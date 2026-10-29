@@ -88,14 +88,14 @@ object LocalDemoStore {
 
     fun starTips(dateFilter: String? = null): List<Tip> {
         return tips.filter { it.starOfDay && (dateFilter == null || it.tipDate == dateFilter) }
-            .sortedWith(compareByDescending<Tip> { it.tipDate }.thenBy { it.id })
+            .let { TipSort.tipsNewestFirst(it) }
             .map { it.copy(locked = false) }
     }
 
     fun paidTips(isAdmin: Boolean, dateFilter: String? = null): Pair<Boolean, List<Tip>> {
         if (!isPaidUnlocked(isAdmin)) return false to emptyList()
         val list = tips.filter { !it.starOfDay && (dateFilter == null || it.tipDate == dateFilter) }
-            .sortedWith(compareByDescending<Tip> { it.tipDate }.thenBy { it.id })
+            .let { TipSort.tipsNewestFirst(it) }
             .map { it.copy(locked = false) }
         return true to list
     }

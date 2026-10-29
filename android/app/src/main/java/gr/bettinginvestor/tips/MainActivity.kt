@@ -38,6 +38,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import gr.bettinginvestor.tips.data.*
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 // MartingaleStore via wildcard
 import gr.bettinginvestor.tips.ui.BiColors
 import gr.bettinginvestor.tips.ui.MartingalePage
@@ -298,9 +300,17 @@ private fun StarPage(user: User, onLogout: () -> Unit) {
     var showEditor by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Tip?>(null) }
     var tick by remember { mutableStateOf(0) }
+    var liveMap by remember { mutableStateOf<Map<Int, LiveScore>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            try { liveMap = ApiClient.liveScores(today) } catch (_: Exception) { }
+            delay(45_000)
+        }
+    }
     val allStars = remember(tick) { LocalDemoStore.starTips(null) }
-    val todayStars = allStars.filter { it.tipDate == today }
-    val history = allStars.filter { it.tipDate != today }
+    val sortedStars = TipSort.tipsNewestFirst(allStars).map { t -> liveMap[t.id]?.let { t.copy(live = it) } ?: t }
+    val todayStars = sortedStars.filter { it.tipDate == today }
+    val history = sortedStars.filter { it.tipDate != today }
     val stats = remember(tick) { LocalDemoStore.starStats() }
     // cumulative map for history display (oldest→newest then look up)
     val cumById = remember(tick) {
@@ -402,6 +412,13 @@ private fun PaidPage(user: User, prefs: SharedPreferences, onLogout: () -> Unit)
     var showEditor by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Tip?>(null) }
     val today = todayStr()
+    var liveMap by remember { mutableStateOf<Map<Int, LiveScore>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            try { liveMap = ApiClient.liveScores(today) } catch (_: Exception) { }
+            delay(45_000)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -472,8 +489,9 @@ private fun PaidPage(user: User, prefs: SharedPreferences, onLogout: () -> Unit)
             }
         } else {
             val paidList = remember(tick, unlocked) { LocalDemoStore.paidTips(user.isAdmin, null).second }
-            val todayPaid = paidList.filter { it.tipDate == today }
-            val histPaid = paidList.filter { it.tipDate != today }
+            val sortedPaid = TipSort.tipsNewestFirst(paidList).map { tip -> liveMap[tip.id]?.let { tip.copy(live = it) } ?: tip }
+            val todayPaid = sortedPaid.filter { it.tipDate == today }
+            val histPaid = sortedPaid.filter { it.tipDate != today }
             val stats = remember(tick, unlocked) { LocalDemoStore.paidStats(user.isAdmin) }
             val systems = remember(tick, unlocked) { LocalDemoStore.systemsForPaid(user.isAdmin) }
 
@@ -589,6 +607,27 @@ private fun PremiumTipCard(
                     if (tip.starOfDay) {
                         Spacer(Modifier.height(6.dp))
                         StarOfDayBadge(compact = true)
+                    }
+                    tip.live?.takeIf { it.live || (it.score != null && tip.resultWon == null) }?.let { live ->
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (live.live) {
+                                Box(
+                                    Modifier
+                                        .background(BiColors.Loss, RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                                ) {
+                                    Text("LIVE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                }
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text(
+                                listOfNotNull(live.score, live.status.takeIf { it.isNotBlank() }).joinToString(" · "),
+                                color = if (live.live) BiColors.Loss else BiColors.TextMuted,
+                                fontWeight = if (live.live) FontWeight.SemiBold else FontWeight.Normal,
+                                fontSize = 12.sp,
+                            )
+                        }
                     }
                 }
                 if (isAdmin) {

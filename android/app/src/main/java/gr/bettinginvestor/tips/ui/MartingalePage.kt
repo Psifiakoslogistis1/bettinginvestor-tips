@@ -29,7 +29,11 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaultsDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -78,6 +82,8 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
         LocalDemoStore.isPaidUnlocked(user.isAdmin)
     var showAdd by remember { mutableStateOf(false) }
     var baseInput by remember { mutableStateOf(MartingaleStore.baseStake().toString()) }
+    var starMultInput by remember { mutableStateOf(MartingaleStore.starMultiplier().toString()) }
+    var lossMultInput by remember { mutableStateOf(MartingaleStore.lossMultiplier().toString()) }
     var showResetConfirm by remember { mutableStateOf(false) }
 
     val state = remember(tick) { MartingaleStore.state() }
@@ -143,10 +149,10 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                     }
                 }
                 item {
-                    val todayStake = state.bets.firstOrNull { it.resultWon == null }?.stake ?: state.baseStake
+                    val todayStake = state.bets.firstOrNull { it.resultWon == null }?.stake ?: state.levelStake
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         MetricCard("Στοίχημα", eur(todayStake) + " €", BiColors.Text, Modifier.weight(1f))
-                        MetricCard("Ζημιές κύκλου", eur(state.cycleLosses) + " €", BiColors.Loss, Modifier.weight(1f))
+                        MetricCard("Level", eur(state.levelStake) + " €", BiColors.Loss, Modifier.weight(1f))
                     }
                 }
                 item {
@@ -155,10 +161,29 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                         MetricCard("Base", eur(state.baseStake) + " €", BiColors.GoldDim, Modifier.weight(1f))
                     }
                 }
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        MetricCard("Σημείο ×", "×" + eur(state.starMultiplier, 0), BiColors.Gold, Modifier.weight(1f))
+                        MetricCard("Ήττα ×", "×" + eur(state.lossMultiplier, 0), BiColors.Loss, Modifier.weight(1f))
+                    }
+                }
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = BiColors.Card),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            state.ruleSummary,
+                            modifier = Modifier.padding(14.dp),
+                            color = BiColors.TextMuted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
 
                 val pending = state.bets.firstOrNull { it.resultWon == null }
-                val warnOdds = pending?.odds ?: 2.0
-                if (MartingaleStore.nextStakeExceedsPool(warnOdds) || (pending != null && pending.stake > state.pool)) {
+                if (MartingaleStore.nextStakeExceedsPool(pending?.starOfDay == true) || (pending != null && pending.poolExceeded)) {
                     item {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = BiColors.Loss.copy(alpha = 0.15f)),
@@ -216,19 +241,35 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     colors = fieldColorsMg(),
                                 )
+                                OutlinedTextField(
+                                    value = starMultInput,
+                                    onValueChange = { starMultInput = it },
+                                    label = { Text("Σημείο Ημέρας ×") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    colors = fieldColorsMg(),
+                                )
+                                OutlinedTextField(
+                                    value = lossMultInput,
+                                    onValueChange = { lossMultInput = it },
+                                    label = { Text("Ήττα × (επόμενο level)") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    colors = fieldColorsMg(),
+                                )
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button(
                                         onClick = {
-                                            baseInput.replace(',', '.').toDoubleOrNull()?.let {
-                                                MartingaleStore.setBaseStake(it)
-                                                tick++
-                                            }
+                                            baseInput.replace(',', '.').toDoubleOrNull()?.let { MartingaleStore.setBaseStake(it) }
+                                            starMultInput.replace(',', '.').toDoubleOrNull()?.let { MartingaleStore.setStarMultiplier(it) }
+                                            lossMultInput.replace(',', '.').toDoubleOrNull()?.let { MartingaleStore.setLossMultiplier(it) }
+                                            tick++
                                         },
                                         colors = ButtonDefaults.buttonColors(
                                             containerColor = BiColors.Gold,
                                             contentColor = BiColors.Bg,
                                         ),
-                                    ) { Text("Αποθήκευση base") }
+                                    ) { Text("Αποθήκευση") }
                                     OutlinedButton(onClick = { showResetConfirm = true }) { Text("Reset 1000€") }
                                 }
                             }
@@ -259,7 +300,8 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                             Column(Modifier.padding(14.dp)) {
                                 Text(bet.matchName, fontWeight = FontWeight.Bold, color = BiColors.Text)
                                 Text(
-                                    bet.tipDate + " · " + bet.market + " · βήμα #" + bet.cycleStep,
+                                    bet.tipDate + " · " + bet.market + " · βήμα #" + bet.cycleStep +
+                                        (if (bet.starOfDay) " · Σημείο" else ""),
                                     color = BiColors.TextMuted,
                                     fontSize = 12.sp,
                                 )
@@ -279,6 +321,13 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
                                     }
                                     Text("Stake " + eur(bet.stake) + " €", color = BiColors.Text)
                                 }
+                                Text(
+                                    "Level " + eur(bet.levelBefore) + "€ · ×" + eur(bet.starMultiplierApplied, 0) +
+                                        " σημείο · ήττα ×" + eur(bet.lossMultiplier, 0) +
+                                        (if (bet.poolExceeded) " · POOL CAP" else ""),
+                                    color = if (bet.poolExceeded) BiColors.Loss else BiColors.TextMuted,
+                                    fontSize = 11.sp,
+                                )
                                 val won = bet.resultWon
                                 if (won == null) {
                                     if (user.isAdmin) {
@@ -333,8 +382,8 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
     if (showAdd) {
         AddPickDialog(
             onDismiss = { showAdd = false },
-            onSave = { match, market, odds ->
-                MartingaleStore.addPick(match, market, odds)
+            onSave = { match, market, odds, star ->
+                MartingaleStore.addPick(match, market, odds, starOfDay = star)
                 showAdd = false
                 tick++
             },
@@ -350,7 +399,9 @@ fun MartingalePage(user: User, prefs: SharedPreferences, onLogout: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     val b = baseInput.replace(',', '.').toDoubleOrNull() ?: MartingaleStore.DEFAULT_BASE
-                    MartingaleStore.reset(b)
+                    val sm = starMultInput.replace(',', '.').toDoubleOrNull() ?: MartingaleStore.DEFAULT_STAR_MULT
+                    val lm = lossMultInput.replace(',', '.').toDoubleOrNull() ?: MartingaleStore.DEFAULT_LOSS_MULT
+                    MartingaleStore.reset(b, sm, lm)
                     showResetConfirm = false
                     tick++
                 }) { Text("Reset", color = BiColors.Loss) }
@@ -403,12 +454,13 @@ private fun Paywall(padding: PaddingValues, onUnlock: () -> Unit) {
 }
 
 @Composable
-private fun AddPickDialog(onDismiss: () -> Unit, onSave: (String, String, Double) -> Unit) {
+private fun AddPickDialog(onDismiss: () -> Unit, onSave: (String, String, Double, Boolean) -> Unit) {
     var match by remember { mutableStateOf("") }
     var market by remember { mutableStateOf("") }
     var odds by remember { mutableStateOf("") }
+    var star by remember { mutableStateOf(false) }
     val o = odds.replace(',', '.').toDoubleOrNull()
-    val preview = o?.let { MartingaleStore.stakeForOdds(it) }
+    val preview = MartingaleStore.stakeForOdds(o ?: 2.0, star)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -426,10 +478,18 @@ private fun AddPickDialog(onDismiss: () -> Unit, onSave: (String, String, Double
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     colors = fieldColorsMg(),
                 )
-                if (preview != null && o != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = star,
+                        onCheckedChange = { star = it },
+                        colors = CheckboxDefaults.colors(checkedColor = BiColors.Gold),
+                    )
+                    Text("Σημείο Ημέρας (×" + eur(MartingaleStore.starMultiplier(), 0) + ")", color = BiColors.Text)
+                }
+                if (o != null) {
                     Text("Υπολογισμένο stake: " + eur(preview) + " €", color = BiColors.Gold, fontWeight = FontWeight.Bold)
-                    if (MartingaleStore.nextStakeExceedsPool(o)) {
-                        Text("Υπερβαίνει το pool " + eur(MartingaleStore.state().pool) + " €", color = BiColors.Loss)
+                    if (MartingaleStore.nextStakeExceedsPool(star)) {
+                        Text("Υπερβαίνει το pool — θα πονταριστεί όλο το υπόλοιπο", color = BiColors.Loss)
                     }
                 }
             }
@@ -437,7 +497,7 @@ private fun AddPickDialog(onDismiss: () -> Unit, onSave: (String, String, Double
         confirmButton = {
             TextButton(onClick = {
                 if (match.isNotBlank() && market.isNotBlank() && o != null && o > 1.0) {
-                    onSave(match.trim(), market.trim(), o)
+                    onSave(match.trim(), market.trim(), o, star)
                 }
             }) { Text("Καταχώριση", color = BiColors.Gold) }
         },

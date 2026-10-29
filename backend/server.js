@@ -3,6 +3,29 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('./db');
+const liveScores = require('./liveScores');
+
+
+function parseKickoffMinutes(time) {
+  if (!time) return -1;
+  let s = String(time).trim().replace(/^~/, '').trim();
+  s = s.split(/[–—-]/)[0].trim();
+  const m = s.match(/(\d{1,2}):(\d{2})/);
+  if (!m) return -1;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+/** Newest tipDate first; within day latest kickoff first. */
+function sortTipsNewestFirst(rows) {
+  return [...rows].sort((a, b) => {
+    const da = a.tip_date || a.tipDate || '';
+    const db_ = b.tip_date || b.tipDate || '';
+    if (da !== db_) return db_.localeCompare(da);
+    const ta = parseKickoffMinutes(a.tip_time || a.time);
+    const tb = parseKickoffMinutes(b.tip_time || b.time);
+    if (ta !== tb) return tb - ta;
+    return (b.id || 0) - (a.id || 0);
+  });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3847;
@@ -99,7 +122,7 @@ async function hasPaidAccess(user) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.6.0' });
+  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.0' });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -157,6 +180,21 @@ app.get('/api/stats', async (_req, res) => {
   res.json(buildStats((await db.allSettledTips()).filter((t) => t.star_of_day), []));
 });
 
+
+async function tipsWithLive(rows) {
+  try {
+    const unsettled = rows.filter((t) => t.result_won === null || t.result_won === undefined);
+    const map = unsettled.length ? await liveScores.scoresForTips(unsettled) : {};
+    return rows.map((t) => {
+      const base = mapTipFull(t);
+      const live = map[t.id];
+      return live ? { ...base, live } : base;
+    });
+  } catch {
+    return rows.map(mapTipFull);
+  }
+}
+
 app.get('/api/tips', optionalAuth, async (req, res) => {
   const kind = String(req.query.kind || 'star');
   const tipDate = req.query.date ? String(req.query.date) : null;
@@ -167,6 +205,7 @@ app.get('/api/tips', optionalAuth, async (req, res) => {
   const paidOk = await hasPaidAccess(user);
 
   let rows = tipDate ? await db.tipsByDate(tipDate) : await db.allTips();
+  rows = sortTipsNewestFirst(rows);
   if (kind === 'star') {
     rows = rows.filter((t) => t.star_of_day);
     return res.json({
@@ -175,7 +214,7 @@ app.get('/api/tips', optionalAuth, async (req, res) => {
       today,
       paywall: false,
       dayUnlocked: true,
-      tips: rows.map(mapTipFull),
+      tips: await tipsWithLive(rows),
       count: rows.length,
       dailyPassEur: DAILY_PASS_EUR,
     });
@@ -205,7 +244,7 @@ app.get('/api/tips', optionalAuth, async (req, res) => {
     today,
     paywall: false,
     dayUnlocked: true,
-    tips: rows.map(mapTipFull),
+    tips: await tipsWithLive(rows),
     count: rows.length,
     system: system
       ? {
@@ -266,6 +305,32 @@ app.put('/api/tips/:id', auth, adminOnly, async (req, res) => {
   res.json(mapTipFull(await db.updateTip(id, patch)));
 });
 
+
+app.get('/api/live-scores', optionalAuth, async (req, res) => {
+  const tipDate = String(req.query.date || todayAthens());
+  const rows = await db.tipsByDate(tipDate);
+  // also include unsettled nearby dates
+  const all = rows.length ? rows : (await db.allTips()).filter((t) => t.tip_date === tipDate);
+  const unsettled = (await db.allTips()).filter((t) => t.result_won === null || t.result_won === undefined);
+  const tips = [...new Map([...all, ...unsettled].map((t) => [t.id, t])).values()];
+  const map = await liveScores.scoresForTips(tips);
+  // optional auto-settle finals (admin override later via tip edit)
+  if (process.env.LIVE_AUTO_SETTLE === 'true') {
+    for (const tip of tips) {
+      const live = map[tip.id];
+      if (!live || !live.final) continue;
+      if (tip.result_won !== null && tip.result_won !== undefined) continue;
+      const inferred = liveScores.inferResult(tip, live);
+      if (inferred === null) continue;
+      const stake = tip.stake || 0;
+      const profit = inferred ? Number(((stake) * (tip.odds - 1)).toFixed(3)) : -Number(stake);
+      await db.updateTip(tip.id, { result_won: inferred ? 1 : 0, profit, result_detail: inferred ? 'Νίκη (auto live)' : 'Ήττα (auto live)' });
+      live.autoSettled = inferred;
+    }
+  }
+  res.json({ date: tipDate, updatedAt: new Date().toISOString(), pollSeconds: 60, scores: map });
+});
+
 app.delete('/api/tips/:id', auth, adminOnly, async (req, res) => {
   if (!await db.deleteTip(Number(req.params.id))) return res.status(404).json({ error: 'Δεν βρέθηκε' });
   res.json({ ok: true });
@@ -292,17 +357,52 @@ app.post('/api/unlock', auth, async (req, res) => {
 
 
 function mgRound(v) { return Math.round(v * 100) / 100; }
-function mgStakeFor(mg, odds) {
-  if (odds <= 1) return mg.baseStake;
-  if (mg.cycleLosses <= 0) return mg.baseStake;
-  return (mg.cycleLosses + mg.baseStake) / (odds - 1);
+function mgNorm(mg) {
+  const base = Number(mg.baseStake) > 0 ? Number(mg.baseStake) : 25;
+  const starMult = Number(mg.starMultiplier) > 0 ? Number(mg.starMultiplier) : 2;
+  const lossMult = Number(mg.lossMultiplier) > 0 ? Number(mg.lossMultiplier) : 10;
+  let level = mg.levelStake != null ? Number(mg.levelStake) : Number(mg.cycleLosses);
+  if (!Number.isFinite(level) || level <= 0) level = base;
+  // legacy recovery-formula seeds used cycleLosses as accumulated €; rules v2 uses it as levelStake
+  if (mg.rulesVersion !== 2 && level === 0) level = base;
+  mg.baseStake = base;
+  mg.starMultiplier = starMult;
+  mg.lossMultiplier = lossMult;
+  mg.levelStake = level;
+  mg.cycleLosses = level; // persisted in PG cycle_losses column
+  mg.rulesVersion = 2;
+  mg.startingPool = mg.startingPool || 1000;
+  return mg;
+}
+/** Desired stake before pool cap. starOfDay applies starMultiplier on current levelStake. */
+function mgDesiredStake(mg, starOfDay) {
+  mgNorm(mg);
+  return mgRound(mg.levelStake * (starOfDay ? mg.starMultiplier : 1));
+}
+function mgComputeStake(mg, starOfDay) {
+  const desired = mgDesiredStake(mg, starOfDay);
+  const poolExceeded = desired > mg.pool + 1e-9;
+  const stake = poolExceeded ? mgRound(mg.pool) : desired;
+  return { desired, stake, poolExceeded, levelBefore: mg.levelStake, starMultiplierApplied: starOfDay ? mg.starMultiplier : 1 };
 }
 function mgPublic(mg) {
+  mgNorm(mg);
   return {
-    pool: mg.pool, baseStake: mg.baseStake, cycleStep: mg.cycleStep, cycleLosses: mg.cycleLosses,
-    peakPool: mg.peakPool, maxDrawdown: mg.maxDrawdown, startingPool: 1000,
+    rulesVersion: 2,
+    ruleSummary:
+      'Base B. Σημείο Ημέρας = level×starMult (προεπιλογή ×2). Μετά από ήττα: next level = level×lossMult (προεπιλογή ×10), μετά ×starMult αν το επόμενο είναι Σημείο. Νίκη → reset στο base. Αν το stake > pool, ποντάρουμε όλο το pool (flag). Το ×10 εφαρμόζεται στο base-level (πριν το ×2), όχι στο διπλασιασμένο ποσό που παίχτηκε.',
+    pool: mg.pool,
+    baseStake: mg.baseStake,
+    starMultiplier: mg.starMultiplier,
+    lossMultiplier: mg.lossMultiplier,
+    levelStake: mg.levelStake,
+    cycleStep: mg.cycleStep,
+    cycleLosses: mg.levelStake,
+    peakPool: mg.peakPool,
+    maxDrawdown: mg.maxDrawdown,
+    startingPool: mg.startingPool || 1000,
     bets: [...(mg.bets || [])].sort((a, b) => b.id - a.id),
-    poolHistory: [1000, ...[...(mg.bets || [])].filter(b => b.poolAfter != null).sort((a,b)=>a.id-b.id).map(b => b.poolAfter)],
+    poolHistory: [mg.startingPool || 1000, ...[...(mg.bets || [])].filter((b) => b.poolAfter != null).sort((a, b) => a.id - b.id).map((b) => b.poolAfter)],
   };
 }
 
@@ -314,10 +414,26 @@ app.get('/api/martingale', auth, async (req, res) => {
   res.json(mgPublic(await db.getMartingale()));
 });
 
+app.put('/api/martingale/settings', auth, adminOnly, async (req, res) => {
+  const mg = mgNorm(await db.getMartingale());
+  const base = Number(req.body.baseStake);
+  const star = Number(req.body.starMultiplier);
+  const loss = Number(req.body.lossMultiplier);
+  if (Number.isFinite(base) && base > 0) mg.baseStake = base;
+  if (Number.isFinite(star) && star > 0) mg.starMultiplier = star;
+  if (Number.isFinite(loss) && loss > 0) mg.lossMultiplier = loss;
+  // if currently at "fresh" level equal to old base intuition, keep level at base when base changes and step==1 with no open recovery
+  if (mg.cycleStep === 1 && Number.isFinite(base) && base > 0) {
+    // only bump level if it still equals previous default-ish; safer: if level was old base, sync
+  }
+  await db.saveMartingale(mg);
+  res.json(mgPublic(mg));
+});
+
 app.put('/api/martingale/base', auth, adminOnly, async (req, res) => {
   const base = Number(req.body.baseStake);
   if (!Number.isFinite(base) || base <= 0) return res.status(400).json({ error: 'Άκυρο base stake' });
-  const mg = await db.getMartingale();
+  const mg = mgNorm(await db.getMartingale());
   mg.baseStake = base;
   await db.saveMartingale(mg);
   res.json(mgPublic(mg));
@@ -325,12 +441,21 @@ app.put('/api/martingale/base', auth, adminOnly, async (req, res) => {
 
 app.post('/api/martingale/reset', auth, adminOnly, async (req, res) => {
   const base = Number(req.body.baseStake) || 25;
+  const star = Number(req.body.starMultiplier) || 2;
+  const loss = Number(req.body.lossMultiplier) || 10;
   const mg = {
-    pool: 1000, baseStake: base, cycleStep: 1, cycleLosses: 0,
-    peakPool: 1000, maxDrawdown: 0, bets: [],
+    rulesVersion: 2,
+    pool: 1000, baseStake: base, starMultiplier: star, lossMultiplier: loss,
+    levelStake: base, cycleStep: 1, cycleLosses: base,
+    peakPool: 1000, maxDrawdown: 0, bets: [], startingPool: 1000,
   };
   await db.saveMartingale(mg);
   res.json(mgPublic(mg));
+});
+
+app.post('/api/martingale/reseed', auth, adminOnly, async (req, res) => {
+  const seeded = await db.reseedMartingale();
+  res.json(mgPublic(seeded));
 });
 
 app.post('/api/martingale/picks', auth, adminOnly, async (req, res) => {
@@ -338,15 +463,18 @@ app.post('/api/martingale/picks', auth, adminOnly, async (req, res) => {
   const market = String(req.body.market || '').trim();
   const odds = Number(req.body.odds);
   const tipDate = String(req.body.tipDate || todayAthens());
+  const starOfDay = !!req.body.starOfDay;
   if (!matchName || !market || !Number.isFinite(odds) || odds <= 1) {
     return res.status(400).json({ error: 'Συμπλήρωσε αγώνα, αγορά, απόδοση' });
   }
-  const mg = await db.getMartingale();
-  const stake = mgRound(mgStakeFor(mg, odds));
+  const mg = mgNorm(await db.getMartingale());
+  const { desired, stake, poolExceeded, levelBefore, starMultiplierApplied } = mgComputeStake(mg, starOfDay);
+  if (stake <= 0) return res.status(400).json({ error: 'Το pool είναι 0 — δεν μπορεί να πονταριστεί' });
   const bet = {
-    id: await db.nextMgId(), tipDate, matchName, market, odds, stake,
+    id: await db.nextMgId(), tipDate, matchName, market, odds, stake, desiredStake: desired,
     resultWon: null, profit: null, poolAfter: null,
-    cycleStep: mg.cycleStep, cycleLossesBefore: mg.cycleLosses,
+    cycleStep: mg.cycleStep, levelBefore, cycleLossesBefore: levelBefore,
+    starOfDay, starMultiplierApplied, lossMultiplier: mg.lossMultiplier, poolExceeded,
   };
   mg.bets.push(bet);
   await db.saveMartingale(mg);
@@ -356,16 +484,24 @@ app.post('/api/martingale/picks', auth, adminOnly, async (req, res) => {
 app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) => {
   const id = Number(req.params.id);
   const won = !!req.body.won;
-  const mg = await db.getMartingale();
+  const mg = mgNorm(await db.getMartingale());
   const bet = mg.bets.find((b) => b.id === id);
   if (!bet) return res.status(404).json({ error: 'Δεν βρέθηκε' });
   if (bet.resultWon !== null && bet.resultWon !== undefined) return res.status(400).json({ error: 'Ήδη settled' });
   const profit = won ? mgRound(bet.stake * (bet.odds - 1)) : mgRound(-bet.stake);
   mg.pool = mgRound(mg.pool + profit);
   mg.peakPool = Math.max(mg.peakPool, mg.pool);
-  mg.maxDrawdown = Math.max(mg.maxDrawdown, mg.peakPool - mg.pool);
-  if (won) { mg.cycleLosses = 0; mg.cycleStep = 1; }
-  else { mg.cycleLosses = mgRound(mg.cycleLosses + bet.stake); mg.cycleStep += 1; }
+  mg.maxDrawdown = Math.max(mg.maxDrawdown, mgRound(mg.peakPool - mg.pool));
+  const levelBefore = Number(bet.levelBefore != null ? bet.levelBefore : mg.levelStake);
+  if (won) {
+    mg.levelStake = mg.baseStake;
+    mg.cycleLosses = mg.baseStake;
+    mg.cycleStep = 1;
+  } else {
+    mg.levelStake = mgRound(levelBefore * mg.lossMultiplier);
+    mg.cycleLosses = mg.levelStake;
+    mg.cycleStep += 1;
+  }
   bet.resultWon = won; bet.profit = profit; bet.poolAfter = mg.pool;
   await db.saveMartingale(mg);
   res.json({ bet, state: mgPublic(mg) });
@@ -375,7 +511,17 @@ app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) =
 async function start() {
   if (db.ready) await db.ready();
   app.listen(PORT, () => {
-    console.log(`Tips API :${PORT} v0.6.0 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
+    console.log(`Tips API :${PORT} v0.7.0 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
   });
+  // background live-score poll (ESPN public JSON, no key)
+  const tick = async () => {
+    try {
+      const today = todayAthens();
+      const rows = (await db.allTips()).filter((t) => t.tip_date === today || t.result_won === null || t.result_won === undefined);
+      await liveScores.scoresForTips(rows.slice(0, 80));
+    } catch (e) { console.warn('[live]', e.message); }
+  };
+  tick();
+  setInterval(tick, liveScores.POLL_MS);
 }
 start().catch((e) => { console.error(e); process.exit(1); });

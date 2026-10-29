@@ -1,23 +1,35 @@
-# BettingInvestor Tips v0.6
+# BettingInvestor Tips v0.7
 
-Live API + offline demo. Tabs: Επιλογές · Ημερήσια · Martingale.
+Tabs: Επιλογές · Ημερήσια · Martingale. Live API on Render + offline seed fallback.
 
 ## Admin
 
 - Email: `bettinginvestor@hotmail.com`
-- Password: set only via Render env `ADMIN_PASSWORD` (never commit secrets). Local/demo: put the same value in your private secrets file.
+- Password: Render env `ADMIN_PASSWORD` only (never commit).
 
-## Martingale
+## Martingale (rules v2)
 
-- Pool start: 1000€
-- Base stake: **25€**
-- Seeded with all settled Excel tips (31 bets, chronological)
-- After loss: stake = (cycleLosses + base) / (odds − 1); win resets to base
+- Pool start **1000€**, base **25€** (admin-editable)
+- All settled tips incl. Σημεία Ημέρας, chronological for progression
+- Σημείο Ημέρας stake = **level × starMult** (default ×2 → 50€ at base)
+- After **LOSS**: next level = **level × lossMult** (default ×10 on the pre-star level, not the doubled stake); then ×starMult again if next is Σημείο
+- After **WIN**: level resets to base
+- If desired stake > pool → stake entire pool + `poolExceeded` flag
+- History UI: newest first; within day latest kickoff on top
 
-## Backend (Render)
+## Live scores
 
-- Repo: `backend/` + free Postgres `DATABASE_URL`
-- Required env: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`, `DATABASE_URL`, `STUB_BILLING`
+- Backend polls ESPN public scoreboards ~60s (no API key)
+- Tips API / `/api/live-scores` expose score + status when matched
+- App shows red **LIVE** badge; polls ~45s. Optional auto-settle: `LIVE_AUTO_SETTLE=true`
+
+## Backend
+
+Required env: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`, `DATABASE_URL`, `STUB_BILLING`
+
+```bash
+cd backend && npm start
+```
 
 ## Build
 

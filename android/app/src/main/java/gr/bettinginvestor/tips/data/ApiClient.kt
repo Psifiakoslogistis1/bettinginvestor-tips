@@ -15,6 +15,13 @@ data class User(val id: Int, val email: String, val name: String, val role: Stri
     val isAdmin: Boolean get() = role == "admin"
 }
 
+data class LiveScore(
+    val live: Boolean,
+    val final: Boolean,
+    val status: String,
+    val score: String?,
+)
+
 data class Tip(
     val id: Int,
     val matchName: String,
@@ -31,6 +38,7 @@ data class Tip(
     val resultDetail: String?,
     val profit: Double?,
     val locked: Boolean,
+    val live: LiveScore? = null,
 )
 
 data class DaySystem(
@@ -269,6 +277,36 @@ object ApiClient {
         id = o.getInt("id"), email = o.getString("email"), name = o.getString("name"), role = o.getString("role"),
     )
 
+    suspend fun liveScores(date: String? = null): Map<Int, LiveScore> {
+        val path = if (date != null) "/api/live-scores?date=$date" else "/api/live-scores"
+        val json = request("GET", path, authed = false)
+        val scores = json.optJSONObject("scores") ?: return emptyMap()
+        val out = mutableMapOf<Int, LiveScore>()
+        val keys = scores.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val o = scores.getJSONObject(k)
+            val id = k.toIntOrNull() ?: continue
+            out[id] = LiveScore(
+                live = o.optBoolean("live", false),
+                final = o.optBoolean("final", false),
+                status = o.optString("status", ""),
+                score = if (o.isNull("score")) null else o.optString("score"),
+            )
+        }
+        return out
+    }
+
+    private fun parseLive(o: JSONObject?): LiveScore? {
+        if (o == null) return null
+        return LiveScore(
+            live = o.optBoolean("live", false),
+            final = o.optBoolean("final", false),
+            status = o.optString("status", ""),
+            score = if (o.isNull("score")) null else o.optString("score"),
+        )
+    }
+
     private fun parseTip(o: JSONObject) = Tip(
         id = o.getInt("id"),
         matchName = o.getString("matchName"),
@@ -285,5 +323,6 @@ object ApiClient {
         resultDetail = if (o.isNull("resultDetail")) null else o.optString("resultDetail"),
         profit = if (o.isNull("profit")) null else o.getDouble("profit"),
         locked = o.optBoolean("locked", false),
+        live = if (o.has("live") && !o.isNull("live")) parseLive(o.getJSONObject("live")) else null,
     )
 }

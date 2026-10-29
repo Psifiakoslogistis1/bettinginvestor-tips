@@ -23,13 +23,13 @@ function createJsonDb() {
     if (!fs.existsSync(dbPath)) {
       return {
         users: [], tips: [], daily_systems: [], unlocks: [],
-        martingale: { pool: 1000, baseStake: 25, cycleStep: 1, cycleLosses: 0, peakPool: 1000, maxDrawdown: 0, bets: [] },
+        martingale: { rulesVersion: 2, pool: 1000, baseStake: 25, starMultiplier: 2, lossMultiplier: 10, levelStake: 25, cycleStep: 1, cycleLosses: 25, peakPool: 1000, maxDrawdown: 0, bets: [] },
         seq: { users: 1, tips: 1, unlocks: 1, systems: 1, mg: 1 },
       };
     }
     const store = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
     if (!store.martingale) {
-      store.martingale = { pool: 1000, baseStake: 25, cycleStep: 1, cycleLosses: 0, peakPool: 1000, maxDrawdown: 0, bets: [] };
+      store.martingale = { rulesVersion: 2, pool: 1000, baseStake: 25, starMultiplier: 2, lossMultiplier: 10, levelStake: 25, cycleStep: 1, cycleLosses: 25, peakPool: 1000, maxDrawdown: 0, bets: [] };
     }
     if (!store.seq) store.seq = { users: 1, tips: 1, unlocks: 1, systems: 1, mg: 1 };
     if (!store.seq.mg) store.seq.mg = 1;
@@ -83,20 +83,47 @@ function createJsonDb() {
     console.log(`[seed] Loaded ${(data.tips || []).length} tips`);
   }
 
-  function seedMartingale() {
+  function loadMgSeedFile() {
     const mgPath = path.join(__dirname, 'martingale-seed.json');
-    if (!fs.existsSync(mgPath)) return;
-    // Only seed if empty bets
-    if (store.martingale && store.martingale.bets && store.martingale.bets.length) return;
-    const mg = JSON.parse(fs.readFileSync(mgPath, 'utf8'));
-    store.martingale = {
-      pool: mg.pool, baseStake: mg.baseStake || 25, cycleStep: mg.cycleStep,
-      cycleLosses: mg.cycleLosses, peakPool: mg.peakPool, maxDrawdown: mg.maxDrawdown,
+    if (!fs.existsSync(mgPath)) return null;
+    return JSON.parse(fs.readFileSync(mgPath, 'utf8'));
+  }
+  function applyMgSeed(mg) {
+    const level = mg.levelStake != null ? mg.levelStake : (mg.cycleLosses || mg.baseStake || 25);
+    return {
+      rulesVersion: mg.rulesVersion || 2,
+      ruleSummary: mg.ruleSummary || null,
+      pool: mg.pool,
+      baseStake: mg.baseStake || 25,
+      starMultiplier: mg.starMultiplier || 2,
+      lossMultiplier: mg.lossMultiplier || 10,
+      levelStake: level,
+      cycleStep: mg.cycleStep || 1,
+      cycleLosses: level,
+      peakPool: mg.peakPool,
+      maxDrawdown: mg.maxDrawdown,
+      startingPool: mg.startingPool || 1000,
       bets: mg.bets || [],
     };
+  }
+  function seedMartingale() {
+    const mg = loadMgSeedFile();
+    if (!mg) return;
+    const ver = mg.rulesVersion || 2;
+    if (store.martingale && store.martingale.bets && store.martingale.bets.length && store.martingale.rulesVersion === ver) return;
+    store.martingale = applyMgSeed(mg);
     store.seq.mg = mg.nextId || ((mg.bets || []).length + 1);
     save(store);
-    console.log(`[seed] Martingale ${store.martingale.bets.length} bets, pool=${store.martingale.pool}`);
+    console.log(`[seed] Martingale v${ver} ${store.martingale.bets.length} bets, pool=${store.martingale.pool}`);
+  }
+  function reseedMartingale() {
+    const mg = loadMgSeedFile();
+    if (!mg) throw new Error('martingale-seed.json missing');
+    store.martingale = applyMgSeed(mg);
+    store.seq.mg = mg.nextId || ((mg.bets || []).length + 1);
+    save(store);
+    console.log(`[reseed] Martingale ${store.martingale.bets.length} bets, pool=${store.martingale.pool}`);
+    return store.martingale;
   }
 
   const adminId = ensureAdmin();
@@ -114,10 +141,10 @@ function createJsonDb() {
       store.users.push(u); save(store); return u;
     },
     tipsByDate(tipDate) {
-      return store.tips.filter((t) => t.tip_date === tipDate).sort((a, b) => (b.star_of_day - a.star_of_day) || (a.id - b.id));
+      return store.tips.filter((t) => t.tip_date === tipDate); // sorted by server sortTipsNewestFirst
     },
     allTips() {
-      return [...store.tips].sort((a, b) => b.tip_date.localeCompare(a.tip_date) || (b.star_of_day - a.star_of_day) || (a.id - b.id));
+      return [...store.tips]; // sorted by server sortTipsNewestFirst
     },
     allSettledTips() { return store.tips.filter((t) => t.result_won !== null && t.result_won !== undefined); },
     getTip(id) { return store.tips.find((t) => t.id === id) || null; },
@@ -159,6 +186,7 @@ function createJsonDb() {
     getMartingale() { return store.martingale; },
     saveMartingale(mg) { store.martingale = mg; save(store); return store.martingale; },
     nextMgId() { const id = store.seq.mg++; save(store); return id; },
+    reseedMartingale() { return reseedMartingale(); },
   };
   // Promise-wrap so server can always await
   return new Proxy(api, {
@@ -240,6 +268,10 @@ function createPgDb() {
         bets_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         next_mg_id INT NOT NULL DEFAULT 1
       );
+
+      ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS star_multiplier DOUBLE PRECISION NOT NULL DEFAULT 2;
+      ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS loss_multiplier DOUBLE PRECISION NOT NULL DEFAULT 10;
+      ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS rules_version INT NOT NULL DEFAULT 1;
       INSERT INTO martingale_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
       CREATE INDEX IF NOT EXISTS idx_tips_date ON tips(tip_date);
     `);
@@ -285,16 +317,20 @@ function createPgDb() {
       }
     }
 
-    const mgRow = await q('SELECT jsonb_array_length(bets_json) AS n FROM martingale_state WHERE id=1');
-    if ((mgRow.rows[0]?.n || 0) === 0) {
-      const mgPath = path.join(__dirname, 'martingale-seed.json');
-      if (fs.existsSync(mgPath)) {
-        const mg = JSON.parse(fs.readFileSync(mgPath, 'utf8'));
+    const mgPath = path.join(__dirname, 'martingale-seed.json');
+    if (fs.existsSync(mgPath)) {
+      const mg = JSON.parse(fs.readFileSync(mgPath, 'utf8'));
+      const ver = mg.rulesVersion || 2;
+      const cur = await q('SELECT jsonb_array_length(bets_json) AS n, rules_version FROM martingale_state WHERE id=1');
+      const n = cur.rows[0]?.n || 0;
+      const curVer = cur.rows[0]?.rules_version || 1;
+      if (n === 0 || curVer !== ver) {
+        const level = mg.levelStake != null ? mg.levelStake : (mg.cycleLosses || mg.baseStake || 25);
         await q(
-          `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8 WHERE id=1`,
-          [mg.pool, mg.baseStake || 25, mg.cycleStep, mg.cycleLosses, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg.nextId || 1]
+          `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8, star_multiplier=$9, loss_multiplier=$10, rules_version=$11 WHERE id=1`,
+          [mg.pool, mg.baseStake || 25, mg.cycleStep, level, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg.nextId || 1, mg.starMultiplier || 2, mg.lossMultiplier || 10, ver]
         );
-        console.log(`[seed] Martingale PG ${mg.bets.length} bets, pool=${mg.pool}`);
+        console.log(`[seed] Martingale PG v${ver} ${(mg.bets || []).length} bets, pool=${mg.pool}`);
       }
     }
   }
@@ -395,20 +431,37 @@ function createPgDb() {
     getMartingale() {
       return q('SELECT * FROM martingale_state WHERE id=1').then((r) => {
         const m = r.rows[0];
+        const level = m.cycle_losses;
         return {
-          pool: m.pool, baseStake: m.base_stake, cycleStep: m.cycle_step, cycleLosses: m.cycle_losses,
+          rulesVersion: m.rules_version || 2,
+          pool: m.pool, baseStake: m.base_stake,
+          starMultiplier: m.star_multiplier || 2, lossMultiplier: m.loss_multiplier || 10,
+          levelStake: level, cycleStep: m.cycle_step, cycleLosses: level,
           peakPool: m.peak_pool, maxDrawdown: m.max_drawdown, bets: m.bets_json || [], _nextId: m.next_mg_id,
+          startingPool: 1000,
         };
       });
     },
     saveMartingale(mg) {
+      const level = mg.levelStake != null ? mg.levelStake : mg.cycleLosses;
       return q(
-        `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8 WHERE id=1`,
-        [mg.pool, mg.baseStake, mg.cycleStep, mg.cycleLosses, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg._nextId || 1],
+        `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8, star_multiplier=$9, loss_multiplier=$10, rules_version=$11 WHERE id=1`,
+        [mg.pool, mg.baseStake, mg.cycleStep, level, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg._nextId || 1, mg.starMultiplier || 2, mg.lossMultiplier || 10, mg.rulesVersion || 2],
       ).then(() => mg);
     },
     nextMgId() {
       return q(`UPDATE martingale_state SET next_mg_id = next_mg_id + 1 WHERE id=1 RETURNING next_mg_id`).then((r) => r.rows[0].next_mg_id - 1);
+    },
+    async reseedMartingale() {
+      const mgPath = path.join(__dirname, 'martingale-seed.json');
+      const mg = JSON.parse(fs.readFileSync(mgPath, 'utf8'));
+      const ver = mg.rulesVersion || 2;
+      const level = mg.levelStake != null ? mg.levelStake : (mg.cycleLosses || mg.baseStake || 25);
+      await q(
+        `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8, star_multiplier=$9, loss_multiplier=$10, rules_version=$11 WHERE id=1`,
+        [mg.pool, mg.baseStake || 25, mg.cycleStep, level, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg.nextId || 1, mg.starMultiplier || 2, mg.lossMultiplier || 10, ver]
+      );
+      return api.getMartingale();
     },
   };
 
