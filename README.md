@@ -1,15 +1,9 @@
-# BettingInvestor Tips v0.7.2
+# BettingInvestor Tips v0.7.3
 
-Tabs: **Σημείο Ημέρας** (δωρεάν) · **Martingale** (0,50€/ημέρα) · **Πληροφορίες**.
+Tabs: Σημείο Ημέρας (δωρεάν) · Martingale (0,50€/ημέρα) · Πληροφορίες.
 
-## Live scores
-- ESPN boards (~60s) including tennis groupings
-- App shows **LIVE** and **FT** badges on tip/Martingale cards (including settled finals)
-- OkHttp timeouts raised for Render cold start; token persisted
-
-## Martingale
-- Auto-sync all tips (daily + Σημείο); tennis auto-settle via winner flags
-- Pool start 1000€, base 25€, Σημείο ×2, loss ×10
-
-## Admin
-Email `bettinginvestor@hotmail.com` — password only in Render `ADMIN_PASSWORD`.
+## Martingale rules (starAfterLoss = x10only)
+- Base 25€ · Σημείο στο base = 50€ (×2)
+- Μετά ήττα: level ×10 · **Σημείο σε recovery = μόνο το level (όχι ×2)** — π.χ. Lehecka 250€
+- Νίκη → reset στο base
+- Full rebuild από όλα τα tips (sequential, Greece time)

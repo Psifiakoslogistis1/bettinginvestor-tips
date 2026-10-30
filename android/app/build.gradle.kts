@@ -11,8 +11,8 @@ android {
         applicationId = "gr.bettinginvestor.tips"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.7.2"
+        versionCode = 10
+        versionName = "0.7.3"
         buildConfigField("String", "API_BASE_URL", "\"https://tips-app-api.onrender.com\"")
         buildConfigField("boolean", "STUB_BILLING", "true")
         buildConfigField("boolean", "USE_LOCAL_DEMO", "false")

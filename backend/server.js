@@ -122,7 +122,7 @@ async function hasPaidAccess(user) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.2' });
+  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.3' });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -367,34 +367,64 @@ function mgNorm(mg) {
   const lossMult = Number(mg.lossMultiplier) > 0 ? Number(mg.lossMultiplier) : 10;
   let level = mg.levelStake != null ? Number(mg.levelStake) : Number(mg.cycleLosses);
   if (!Number.isFinite(level) || level <= 0) level = base;
-  // legacy recovery-formula seeds used cycleLosses as accumulated €; rules v2 uses it as levelStake
   if (mg.rulesVersion !== 2 && level === 0) level = base;
+  const mode = String(mg.starAfterLoss || 'x10only').toLowerCase();
   mg.baseStake = base;
   mg.starMultiplier = starMult;
   mg.lossMultiplier = lossMult;
   mg.levelStake = level;
-  mg.cycleLosses = level; // persisted in PG cycle_losses column
+  mg.cycleLosses = level;
   mg.rulesVersion = 2;
+  mg.starAfterLoss = (mode === 'x10x2') ? 'x10x2' : 'x10only';
   mg.startingPool = mg.startingPool || 1000;
   return mg;
 }
-/** Desired stake before pool cap. starOfDay applies starMultiplier on current levelStake. */
+/** In recovery (after loss, level > base or step > 1). */
+function mgInRecovery(mg) {
+  mgNorm(mg);
+  return mg.cycleStep > 1 || mg.levelStake > mg.baseStake + 1e-9;
+}
+/**
+ * Desired stake. starAfterLoss:
+ *  - x10only (default): Σημείο at base = level×starMult; after loss = level only (already ×10), no extra ×2
+ *  - x10x2: always level×starMult for Σημείο
+ */
 function mgDesiredStake(mg, starOfDay) {
   mgNorm(mg);
-  return mgRound(mg.levelStake * (starOfDay ? mg.starMultiplier : 1));
+  if (!starOfDay) return mgRound(mg.levelStake);
+  if (mg.starAfterLoss === 'x10only' && mgInRecovery(mg)) return mgRound(mg.levelStake);
+  return mgRound(mg.levelStake * mg.starMultiplier);
 }
 function mgComputeStake(mg, starOfDay) {
   const desired = mgDesiredStake(mg, starOfDay);
   const poolExceeded = desired > mg.pool + 1e-9;
   const stake = poolExceeded ? mgRound(mg.pool) : desired;
-  return { desired, stake, poolExceeded, levelBefore: mg.levelStake, starMultiplierApplied: starOfDay ? mg.starMultiplier : 1 };
+  let starMultApplied = 1;
+  if (starOfDay) {
+    starMultApplied = (mg.starAfterLoss === 'x10only' && mgInRecovery(mg)) ? 1 : mg.starMultiplier;
+  }
+  return { desired, stake, poolExceeded, levelBefore: mg.levelStake, starMultiplierApplied: starMultApplied };
+}
+function mgSortBetsNewestFirst(bets) {
+  return [...(bets || [])].sort((a, b) => {
+    const da = String(a.tipDate || '');
+    const db_ = String(b.tipDate || '');
+    if (da !== db_) return db_.localeCompare(da);
+    const ta = parseKickoffMinutes(a.time);
+    const tb = parseKickoffMinutes(b.time);
+    if (ta !== tb) return tb - ta;
+    return (b.id || 0) - (a.id || 0);
+  });
 }
 function mgPublic(mg) {
   mgNorm(mg);
+  const summary = mg.starAfterLoss === 'x10only'
+    ? 'Base B. Σημείο στο base = B×starMult (×2→50). Μετά ήττα: level = level×lossMult (×10). Σημείο σε recovery = μόνο το level (όχι επιπλέον ×2). Νίκη → base. Stake>pool → όλο το pool.'
+    : 'Base B. Σημείο = level×starMult πάντα. Μετά ήττα level×lossMult, μετά ×starMult αν Σημείο. Νίκη → base.';
   return {
     rulesVersion: 2,
-    ruleSummary:
-      'Base B. Σημείο Ημέρας = level×starMult (προεπιλογή ×2). Μετά από ήττα: next level = level×lossMult (προεπιλογή ×10), μετά ×starMult αν το επόμενο είναι Σημείο. Νίκη → reset στο base. Αν το stake > pool, ποντάρουμε όλο το pool (flag). Το ×10 εφαρμόζεται στο base-level (πριν το ×2), όχι στο διπλασιασμένο ποσό που παίχτηκε.',
+    starAfterLoss: mg.starAfterLoss,
+    ruleSummary: summary,
     pool: mg.pool,
     baseStake: mg.baseStake,
     starMultiplier: mg.starMultiplier,
@@ -405,7 +435,7 @@ function mgPublic(mg) {
     peakPool: mg.peakPool,
     maxDrawdown: mg.maxDrawdown,
     startingPool: mg.startingPool || 1000,
-    bets: [...(mg.bets || [])].sort((a, b) => b.id - a.id),
+    bets: mgSortBetsNewestFirst(mg.bets),
     poolHistory: [mg.startingPool || 1000, ...[...(mg.bets || [])].filter((b) => b.poolAfter != null).sort((a, b) => a.id - b.id).map((b) => b.poolAfter)],
   };
 }
@@ -438,12 +468,8 @@ function mgApplySettle(mg, bet, won) {
   bet.poolAfter = mg.pool;
 }
 
-/** Ensure every published tip (incl. Σημείο Ημέρας) is a Martingale bet; settle from tip results. */
-async function syncMartingaleFromTips() {
-  const mg = mgNorm(await db.getMartingale());
-  if (!mg.bets) mg.bets = [];
-  const tips = await db.allTips();
-  const chrono = [...tips].sort((a, b) => {
+function tipsChrono(tips) {
+  return [...tips].sort((a, b) => {
     const da = String(a.tip_date || '').localeCompare(String(b.tip_date || ''));
     if (da) return da;
     const ta = parseKickoffMinutes(a.tip_time);
@@ -451,8 +477,82 @@ async function syncMartingaleFromTips() {
     if (ta !== tb) return ta - tb;
     return (a.id || 0) - (b.id || 0);
   });
+}
+
+/** Full rebuild from pool 1000 using all tips, sequential stakes, starAfterLoss rules. */
+async function rebuildMartingaleFromTips(opts = {}) {
+  const tips = tipsChrono(await db.allTips());
+  const base = Number(opts.baseStake) > 0 ? Number(opts.baseStake) : 25;
+  const starMult = Number(opts.starMultiplier) > 0 ? Number(opts.starMultiplier) : 2;
+  const lossMult = Number(opts.lossMultiplier) > 0 ? Number(opts.lossMultiplier) : 10;
+  const starAfterLoss = (String(opts.starAfterLoss || 'x10only').toLowerCase() === 'x10x2') ? 'x10x2' : 'x10only';
+  const mg = mgNorm({
+    rulesVersion: 2,
+    starAfterLoss,
+    pool: 1000,
+    baseStake: base,
+    starMultiplier: starMult,
+    lossMultiplier: lossMult,
+    levelStake: base,
+    cycleStep: 1,
+    cycleLosses: base,
+    peakPool: 1000,
+    maxDrawdown: 0,
+    bets: [],
+    startingPool: 1000,
+  });
+  let nextId = 1;
+  for (const t of tips) {
+    const star = !!t.star_of_day;
+    const settled = t.result_won !== null && t.result_won !== undefined;
+    const { desired, stake, poolExceeded, levelBefore, starMultiplierApplied } = mgComputeStake(mg, star);
+    if (stake <= 0 && !settled) continue;
+    const bet = {
+      id: nextId++,
+      tipId: t.id,
+      tipDate: t.tip_date,
+      matchName: t.match_name,
+      market: t.market,
+      odds: t.odds,
+      stake: stake > 0 ? stake : mgRound(Math.min(desired, Math.max(mg.pool, 0))),
+      desiredStake: desired,
+      resultWon: null,
+      profit: null,
+      poolAfter: null,
+      cycleStep: mg.cycleStep,
+      levelBefore,
+      cycleLossesBefore: levelBefore,
+      starOfDay: star,
+      starMultiplierApplied,
+      lossMultiplier: mg.lossMultiplier,
+      poolExceeded,
+      time: t.tip_time || null,
+      starAfterLoss: mg.starAfterLoss,
+    };
+    mg.bets.push(bet);
+    if (settled) mgApplySettle(mg, bet, !!t.result_won);
+  }
+  mg._nextId = nextId;
+  await db.saveMartingale(mg);
+  return mg;
+}
+
+/** Append missing tips in chrono order with sequential stakes; settle from tip results. */
+async function syncMartingaleFromTips() {
+  const mg = mgNorm(await db.getMartingale());
+  if (!mg.bets) mg.bets = [];
+  // If empty, full rebuild
+  if (!mg.bets.length) {
+    return rebuildMartingaleFromTips({
+      baseStake: mg.baseStake,
+      starMultiplier: mg.starMultiplier,
+      lossMultiplier: mg.lossMultiplier,
+      starAfterLoss: mg.starAfterLoss,
+    });
+  }
+  const tips = tipsChrono(await db.allTips());
   let changed = false;
-  for (const t of chrono) {
+  for (const t of tips) {
     const key = mgTipKey(t);
     let bet = mg.bets.find((b) => b.tipId === t.id || mgBetKey(b) === key);
     const settled = t.result_won !== null && t.result_won !== undefined;
@@ -480,12 +580,11 @@ async function syncMartingaleFromTips() {
         lossMultiplier: mg.lossMultiplier,
         poolExceeded,
         time: t.tip_time || null,
+        starAfterLoss: mg.starAfterLoss,
       };
       mg.bets.push(bet);
       changed = true;
-      if (settled) {
-        mgApplySettle(mg, bet, !!t.result_won);
-      }
+      if (settled) mgApplySettle(mg, bet, !!t.result_won);
     } else {
       if (bet.tipId == null) { bet.tipId = t.id; changed = true; }
       if (bet.time == null && t.tip_time) { bet.time = t.tip_time; changed = true; }
@@ -533,9 +632,9 @@ app.put('/api/martingale/settings', auth, adminOnly, async (req, res) => {
   if (Number.isFinite(base) && base > 0) mg.baseStake = base;
   if (Number.isFinite(star) && star > 0) mg.starMultiplier = star;
   if (Number.isFinite(loss) && loss > 0) mg.lossMultiplier = loss;
-  // if currently at "fresh" level equal to old base intuition, keep level at base when base changes and step==1 with no open recovery
-  if (mg.cycleStep === 1 && Number.isFinite(base) && base > 0) {
-    // only bump level if it still equals previous default-ish; safer: if level was old base, sync
+  if (req.body.starAfterLoss != null) {
+    const m = String(req.body.starAfterLoss).toLowerCase();
+    mg.starAfterLoss = m === 'x10x2' ? 'x10x2' : 'x10only';
   }
   await db.saveMartingale(mg);
   res.json(mgPublic(mg));
@@ -554,8 +653,9 @@ app.post('/api/martingale/reset', auth, adminOnly, async (req, res) => {
   const base = Number(req.body.baseStake) || 25;
   const star = Number(req.body.starMultiplier) || 2;
   const loss = Number(req.body.lossMultiplier) || 10;
+  const starAfterLoss = (String(req.body.starAfterLoss || 'x10only').toLowerCase() === 'x10x2') ? 'x10x2' : 'x10only';
   const mg = {
-    rulesVersion: 2,
+    rulesVersion: 2, starAfterLoss,
     pool: 1000, baseStake: base, starMultiplier: star, lossMultiplier: loss,
     levelStake: base, cycleStep: 1, cycleLosses: base,
     peakPool: 1000, maxDrawdown: 0, bets: [], startingPool: 1000,
@@ -565,8 +665,14 @@ app.post('/api/martingale/reset', auth, adminOnly, async (req, res) => {
 });
 
 app.post('/api/martingale/reseed', auth, adminOnly, async (req, res) => {
-  const seeded = await db.reseedMartingale();
-  res.json(mgPublic(seeded));
+  const starAfterLoss = req.body && req.body.starAfterLoss ? String(req.body.starAfterLoss) : 'x10only';
+  const rebuilt = await rebuildMartingaleFromTips({
+    baseStake: req.body?.baseStake,
+    starMultiplier: req.body?.starMultiplier,
+    lossMultiplier: req.body?.lossMultiplier,
+    starAfterLoss,
+  });
+  res.json(await mgPublicWithLive(rebuilt));
 });
 
 app.post('/api/martingale/picks', auth, adminOnly, async (req, res) => {
@@ -622,7 +728,7 @@ app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) =
 async function start() {
   if (db.ready) await db.ready();
   app.listen(PORT, () => {
-    console.log(`Tips API :${PORT} v0.7.2 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
+    console.log(`Tips API :${PORT} v0.7.3 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
   });
   // background live-score poll (ESPN public JSON, no key)
   const tick = async () => {

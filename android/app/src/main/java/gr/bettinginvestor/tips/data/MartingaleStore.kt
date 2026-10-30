@@ -57,8 +57,10 @@ object MartingaleStore {
     const val DEFAULT_BASE = 25.0
     const val DEFAULT_STAR_MULT = 2.0
     const val DEFAULT_LOSS_MULT = 10.0
+    /** x10only (default): star after loss = level only; at base = level×starMult */
+    const val STAR_AFTER_LOSS = "x10only"
     const val RULE_SUMMARY =
-        "Base B. Σημείο Ημέρας = level×starMult (×2). Ήττα → next level = level×lossMult (×10), μετά ×star αν Σημείο. Νίκη → base. Stake>pool → όλο το pool."
+        "Base B. Σημείο στο base = B×2. Μετά ήττα level×10· Σημείο σε recovery = μόνο level (όχι ×2). Νίκη → base."
 
     private val athens = ZoneId.of("Europe/Athens")
     private var baseStake: Double = DEFAULT_BASE
@@ -150,8 +152,13 @@ object MartingaleStore {
     fun lossMultiplier(): Double = lossMultiplier
     fun levelStake(): Double = levelStake
 
-    fun desiredStake(starOfDay: Boolean): Double =
-        round2(levelStake * (if (starOfDay) starMultiplier else 1.0))
+    private fun inRecovery(): Boolean = cycleStep > 1 || levelStake > baseStake + 1e-9
+
+    fun desiredStake(starOfDay: Boolean): Double {
+        if (!starOfDay) return round2(levelStake)
+        if (STAR_AFTER_LOSS == "x10only" && inRecovery()) return round2(levelStake)
+        return round2(levelStake * starMultiplier)
+    }
 
     fun computeStake(starOfDay: Boolean): Triple<Double, Double, Boolean> {
         val desired = desiredStake(starOfDay)
@@ -192,11 +199,16 @@ object MartingaleStore {
         tipDate: String = today(), starOfDay: Boolean = false, time: String? = null,
     ): MartingaleBet {
         val (desired, stake, exceeded) = computeStake(starOfDay)
+        val starApplied = when {
+            !starOfDay -> 1.0
+            STAR_AFTER_LOSS == "x10only" && inRecovery() -> 1.0
+            else -> starMultiplier
+        }
         val bet = MartingaleBet(
             id = nextId++, tipDate = tipDate, matchName = matchName, market = market, odds = odds,
             stake = stake, desiredStake = desired, resultWon = null, profit = null, poolAfter = null,
             cycleStep = cycleStep, levelBefore = round2(levelStake), starOfDay = starOfDay,
-            starMultiplierApplied = if (starOfDay) starMultiplier else 1.0,
+            starMultiplierApplied = starApplied,
             lossMultiplier = lossMultiplier, poolExceeded = exceeded, time = time,
         )
         bets.add(bet)
