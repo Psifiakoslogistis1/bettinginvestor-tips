@@ -422,12 +422,9 @@ function mgComputeStake(mg, starOfDay) {
 }
 function mgSortBetsNewestFirst(bets) {
   return [...(bets || [])].sort((a, b) => {
-    const da = String(a.tipDate || '');
-    const db_ = String(b.tipDate || '');
-    if (da !== db_) return db_.localeCompare(da);
-    const ta = slateSortMinutes(a.time);
-    const tb = slateSortMinutes(b.time);
-    if (ta !== tb) return tb - ta;
+    const ka = tipDateTimeKey({ tip_date: a.tipDate, tip_time: a.time, id: a.id });
+    const kb = tipDateTimeKey({ tip_date: b.tipDate, tip_time: b.time, id: b.id });
+    if (ka !== kb) return kb - ka;
     return (b.id || 0) - (a.id || 0);
   });
 }
@@ -483,13 +480,29 @@ function mgApplySettle(mg, bet, won) {
   bet.poolAfter = mg.pool;
 }
 
-function tipsChrono(tips) {
+function tipDateTimeKey(tip, kickoffMsMap) {
+  const id = tip.id;
+  if (kickoffMsMap && kickoffMsMap[id]) return kickoffMsMap[id];
+  // Fallback: tipDate + tip_time; 00:00–07:59 → +1 calendar day (after-midnight end of slate)
+  const dateStr = String(tip.tip_date || tip.tipDate || '1970-01-01');
+  const mins = parseKickoffMinutes(tip.tip_time || tip.time);
+  let day = dateStr;
+  let m = mins;
+  if (m >= 0 && m < 8 * 60) {
+    // after-midnight → next calendar morning after tipDate evening
+    const dt = new Date(dateStr + 'T12:00:00Z');
+    dt.setUTCDate(dt.getUTCDate() + 1);
+    day = dt.toISOString().slice(0, 10);
+  }
+  if (m < 0) m = 12 * 60; // unknown → midday
+  return Date.parse(day + 'T00:00:00+03:00') + m * 60 * 1000;
+}
+
+function tipsChrono(tips, kickoffMsMap) {
   return [...tips].sort((a, b) => {
-    const da = String(a.tip_date || '').localeCompare(String(b.tip_date || ''));
-    if (da) return da;
-    const ta = slateSortMinutes(a.tip_time);
-    const tb = slateSortMinutes(b.tip_time);
-    if (ta !== tb) return ta - tb;
+    const ka = tipDateTimeKey(a, kickoffMsMap);
+    const kb = tipDateTimeKey(b, kickoffMsMap);
+    if (ka !== kb) return ka - kb;
     return (a.id || 0) - (b.id || 0);
   });
 }

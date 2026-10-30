@@ -126,6 +126,8 @@ function pushCompetition(out, comp, fallbackId) {
   if ((scoreHome == null || scoreHome === '') && lsHome) scoreHome = lsHome;
   if ((scoreAway == null || scoreAway === '') && lsAway) scoreAway = lsAway;
   const note = ((comp.notes || [])[0] || {}).text || '';
+  const startIso = comp.date || comp.startDate || null;
+  const dateMs = startIso ? Date.parse(startIso) : null;
   out.push({
     id: comp.id || fallbackId,
     name: note || `${nameAway} at ${nameHome}`,
@@ -142,6 +144,8 @@ function pushCompetition(out, comp, fallbackId) {
     clock: stWrap.displayClock || '',
     period: stWrap.period,
     completed: !!status.completed,
+    dateMs: Number.isFinite(dateMs) ? dateMs : null,
+    dateIso: startIso,
   });
 }
 
@@ -292,4 +296,35 @@ function inferResult(tip, live) {
   return null;
 }
 
-module.exports = { scoresForTips, getCached, ensureFresh, refreshBoard, inferResult, POLL_MS };
+
+/** Absolute kickoff ms (UTC) for tips via ESPN match; null if unknown. */
+async function kickoffMsForTips(tips) {
+  await ensureFresh();
+  const out = {};
+  for (const tip of tips) {
+    const m = matchTip(tip, CACHE.events);
+    if (!m) continue;
+    // find event date from cache events by matching names again for date field
+  }
+  // Re-scan CACHE.events for dates — matchTip does not return date; enhance matchTip lightly
+  for (const tip of tips) {
+    const matchName = tip.match_name || tip.matchName || '';
+    const sides = splitMatch(matchName);
+    let best = null; let bestScore = 0; let bestEv = null;
+    for (const ev of CACHE.events) {
+      const s = scoreEvent(sides, ev);
+      if (s > bestScore) { bestScore = s; best = ev; }
+    }
+    if (bestScore < 1 || !best) continue;
+    if (sides[1] && bestScore < 2) {
+      const long = sides[0].split(' ').filter((x) => x.length >= 5);
+      if (!long.length) continue;
+    }
+    // best is parseEvents shape — need original date. Store date on parseEvents.
+    if (best.dateMs) out[tip.id] = best.dateMs;
+  }
+  return out;
+}
+
+module.exports = { scoresForTips, getCached, ensureFresh, refreshBoard, inferResult, kickoffMsForTips, POLL_MS };
+
