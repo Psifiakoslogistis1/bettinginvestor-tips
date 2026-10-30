@@ -12,16 +12,31 @@ function parseKickoffMinutes(time) {
   s = s.split(/[–—-]/)[0].trim();
   const m = s.match(/(\d{1,2}):(\d{2})/);
   if (!m) return -1;
-  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (!Number.isFinite(h) || !Number.isFinite(min)) return -1;
+  return h * 60 + min;
 }
-/** Newest tipDate first; within day latest kickoff first. */
+/**
+ * Slate-relative minutes for tipDate ordering.
+ * Times 00:00–07:59 are after-midnight NBA/etc. → treat as END of the slate (+24h)
+ * so ~05:00 comes after ~20:30 on the same tipDate.
+ * Unknown times → -1 (sort last in ascending / first-ish avoided via id).
+ */
+function slateSortMinutes(time) {
+  const m = parseKickoffMinutes(time);
+  if (m < 0) return -1;
+  if (m < 8 * 60) return m + 24 * 60;
+  return m;
+}
+/** Newest tipDate first; within day latest real kickoff first (after-midnight last on slate = top when newest-first). */
 function sortTipsNewestFirst(rows) {
   return [...rows].sort((a, b) => {
     const da = a.tip_date || a.tipDate || '';
     const db_ = b.tip_date || b.tipDate || '';
     if (da !== db_) return db_.localeCompare(da);
-    const ta = parseKickoffMinutes(a.tip_time || a.time);
-    const tb = parseKickoffMinutes(b.tip_time || b.time);
+    const ta = slateSortMinutes(a.tip_time || a.time);
+    const tb = slateSortMinutes(b.tip_time || b.time);
     if (ta !== tb) return tb - ta;
     return (b.id || 0) - (a.id || 0);
   });
@@ -122,7 +137,7 @@ async function hasPaidAccess(user) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.3' });
+  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.3b' });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -410,8 +425,8 @@ function mgSortBetsNewestFirst(bets) {
     const da = String(a.tipDate || '');
     const db_ = String(b.tipDate || '');
     if (da !== db_) return db_.localeCompare(da);
-    const ta = parseKickoffMinutes(a.time);
-    const tb = parseKickoffMinutes(b.time);
+    const ta = slateSortMinutes(a.time);
+    const tb = slateSortMinutes(b.time);
     if (ta !== tb) return tb - ta;
     return (b.id || 0) - (a.id || 0);
   });
@@ -472,8 +487,8 @@ function tipsChrono(tips) {
   return [...tips].sort((a, b) => {
     const da = String(a.tip_date || '').localeCompare(String(b.tip_date || ''));
     if (da) return da;
-    const ta = parseKickoffMinutes(a.tip_time);
-    const tb = parseKickoffMinutes(b.tip_time);
+    const ta = slateSortMinutes(a.tip_time);
+    const tb = slateSortMinutes(b.tip_time);
     if (ta !== tb) return ta - tb;
     return (a.id || 0) - (b.id || 0);
   });
@@ -728,7 +743,7 @@ app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) =
 async function start() {
   if (db.ready) await db.ready();
   app.listen(PORT, () => {
-    console.log(`Tips API :${PORT} v0.7.3 stubBilling=${STUB_BILLING} today=${todayAthens()}`);
+    console.log(`Tips API :${PORT} v0.7.3b stubBilling=${STUB_BILLING} today=${todayAthens()}`);
   });
   // background live-score poll (ESPN public JSON, no key)
   const tick = async () => {
