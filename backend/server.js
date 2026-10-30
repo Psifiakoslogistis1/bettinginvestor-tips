@@ -137,7 +137,7 @@ async function hasPaidAccess(user) {
 }
 
 app.get('/api/health', async (_req, res) => {
-  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.3b' });
+  res.json({ ok: true, stubBilling: STUB_BILLING, dailyPassEur: DAILY_PASS_EUR, today: todayAthens(), version: '0.7.3c' });
 });
 
 app.post('/api/auth/register', async (req, res) => {
@@ -391,7 +391,8 @@ function mgNorm(mg) {
   mg.cycleLosses = level;
   mg.rulesVersion = 2;
   mg.starAfterLoss = (mode === 'x10x2') ? 'x10x2' : 'x10only';
-  mg.startingPool = mg.startingPool || 1000;
+  mg.startingPool = Number(mg.startingPool) > 0 ? Number(mg.startingPool) : 1000;
+  mg.cycleId = Number(mg.cycleId) > 0 ? Number(mg.cycleId) : 1;
   return mg;
 }
 /** In recovery (after loss, level > base or step > 1). */
@@ -447,6 +448,7 @@ function mgPublic(mg) {
     peakPool: mg.peakPool,
     maxDrawdown: mg.maxDrawdown,
     startingPool: mg.startingPool || 1000,
+    cycleId: mg.cycleId || 1,
     bets: mgSortBetsNewestFirst(mg.bets),
     poolHistory: [mg.startingPool || 1000, ...[...(mg.bets || [])].filter((b) => b.poolAfter != null).sort((a, b) => a.id - b.id).map((b) => b.poolAfter)],
   };
@@ -556,6 +558,7 @@ async function rebuildMartingaleFromTips(opts = {}) {
       poolExceeded,
       time: t.tip_time || null,
       starAfterLoss: mg.starAfterLoss,
+      cycleId: mg.cycleId || 1,
     };
     mg.bets.push(bet);
     if (settled) mgApplySettle(mg, bet, !!t.result_won);
@@ -609,6 +612,7 @@ async function syncMartingaleFromTips() {
         poolExceeded,
         time: t.tip_time || null,
         starAfterLoss: mg.starAfterLoss,
+        cycleId: mg.cycleId || 1,
       };
       mg.bets.push(bet);
       changed = true;
@@ -686,10 +690,39 @@ app.post('/api/martingale/reset', auth, adminOnly, async (req, res) => {
     rulesVersion: 2, starAfterLoss,
     pool: 1000, baseStake: base, starMultiplier: star, lossMultiplier: loss,
     levelStake: base, cycleStep: 1, cycleLosses: base,
-    peakPool: 1000, maxDrawdown: 0, bets: [], startingPool: 1000,
+    peakPool: 1000, maxDrawdown: 0, bets: [], startingPool: 1000, cycleId: 1,
   };
   await db.saveMartingale(mg);
   res.json(mgPublic(mg));
+});
+
+/** Start a new pool cycle; keep old bets as previous-cycle history. Then sync unsettled tips. */
+app.post('/api/martingale/new-cycle', auth, adminOnly, async (req, res) => {
+  const mg = mgNorm(await db.getMartingale());
+  if (!mg.bets) mg.bets = [];
+  const prevCycle = mg.cycleId || 1;
+  for (const b of mg.bets) {
+    if (b.cycleId == null) b.cycleId = prevCycle;
+    b.previousCycle = true;
+  }
+  const startingPool = Number(req.body.startingPool) > 0 ? Number(req.body.startingPool) : 1000;
+  const base = Number(req.body.baseStake) > 0 ? Number(req.body.baseStake) : (mg.baseStake || 25);
+  if (req.body.starAfterLoss != null) {
+    const m = String(req.body.starAfterLoss).toLowerCase();
+    mg.starAfterLoss = m === 'x10x2' ? 'x10x2' : 'x10only';
+  }
+  mg.cycleId = prevCycle + 1;
+  mg.pool = startingPool;
+  mg.startingPool = startingPool;
+  mg.baseStake = base;
+  mg.levelStake = base;
+  mg.cycleLosses = base;
+  mg.cycleStep = 1;
+  mg.peakPool = startingPool;
+  mg.maxDrawdown = 0;
+  await db.saveMartingale(mg);
+  const synced = await syncMartingaleFromTips();
+  res.json(await mgPublicWithLive(synced));
 });
 
 app.post('/api/martingale/reseed', auth, adminOnly, async (req, res) => {
@@ -720,6 +753,7 @@ app.post('/api/martingale/picks', auth, adminOnly, async (req, res) => {
     resultWon: null, profit: null, poolAfter: null,
     cycleStep: mg.cycleStep, levelBefore, cycleLossesBefore: levelBefore,
     starOfDay, starMultiplierApplied, lossMultiplier: mg.lossMultiplier, poolExceeded,
+    starAfterLoss: mg.starAfterLoss, cycleId: mg.cycleId || 1,
   };
   mg.bets.push(bet);
   await db.saveMartingale(mg);
@@ -756,7 +790,7 @@ app.post('/api/martingale/picks/:id/settle', auth, adminOnly, async (req, res) =
 async function start() {
   if (db.ready) await db.ready();
   app.listen(PORT, () => {
-    console.log(`Tips API :${PORT} v0.7.3b stubBilling=${STUB_BILLING} today=${todayAthens()}`);
+    console.log(`Tips API :${PORT} v0.7.3c stubBilling=${STUB_BILLING} today=${todayAthens()}`);
   });
   // background live-score poll (ESPN public JSON, no key)
   const tick = async () => {

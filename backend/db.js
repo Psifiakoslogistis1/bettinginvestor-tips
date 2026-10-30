@@ -103,6 +103,8 @@ function createJsonDb() {
       peakPool: mg.peakPool,
       maxDrawdown: mg.maxDrawdown,
       startingPool: mg.startingPool || 1000,
+      starAfterLoss: mg.starAfterLoss || 'x10only',
+      cycleId: mg.cycleId || 1,
       bets: mg.bets || [],
     };
   }
@@ -272,6 +274,9 @@ function createPgDb() {
       ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS star_multiplier DOUBLE PRECISION NOT NULL DEFAULT 2;
       ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS loss_multiplier DOUBLE PRECISION NOT NULL DEFAULT 10;
       ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS rules_version INT NOT NULL DEFAULT 1;
+      ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS star_after_loss TEXT NOT NULL DEFAULT 'x10only';
+      ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS starting_pool DOUBLE PRECISION NOT NULL DEFAULT 1000;
+      ALTER TABLE martingale_state ADD COLUMN IF NOT EXISTS cycle_id INT NOT NULL DEFAULT 1;
       INSERT INTO martingale_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
       CREATE INDEX IF NOT EXISTS idx_tips_date ON tips(tip_date);
     `);
@@ -438,15 +443,18 @@ function createPgDb() {
           starMultiplier: m.star_multiplier || 2, lossMultiplier: m.loss_multiplier || 10,
           levelStake: level, cycleStep: m.cycle_step, cycleLosses: level,
           peakPool: m.peak_pool, maxDrawdown: m.max_drawdown, bets: m.bets_json || [], _nextId: m.next_mg_id,
-          startingPool: 1000,
+          startingPool: m.starting_pool != null ? m.starting_pool : 1000,
+          starAfterLoss: m.star_after_loss || 'x10only',
+          cycleId: m.cycle_id || 1,
         };
       });
     },
     saveMartingale(mg) {
       const level = mg.levelStake != null ? mg.levelStake : mg.cycleLosses;
+      const starAfter = (String(mg.starAfterLoss || 'x10only').toLowerCase() === 'x10x2') ? 'x10x2' : 'x10only';
       return q(
-        `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8, star_multiplier=$9, loss_multiplier=$10, rules_version=$11 WHERE id=1`,
-        [mg.pool, mg.baseStake, mg.cycleStep, level, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg._nextId || 1, mg.starMultiplier || 2, mg.lossMultiplier || 10, mg.rulesVersion || 2],
+        `UPDATE martingale_state SET pool=$1, base_stake=$2, cycle_step=$3, cycle_losses=$4, peak_pool=$5, max_drawdown=$6, bets_json=$7::jsonb, next_mg_id=$8, star_multiplier=$9, loss_multiplier=$10, rules_version=$11, star_after_loss=$12, starting_pool=$13, cycle_id=$14 WHERE id=1`,
+        [mg.pool, mg.baseStake, mg.cycleStep, level, mg.peakPool, mg.maxDrawdown, JSON.stringify(mg.bets || []), mg._nextId || 1, mg.starMultiplier || 2, mg.lossMultiplier || 10, mg.rulesVersion || 2, starAfter, mg.startingPool || 1000, mg.cycleId || 1],
       ).then(() => mg);
     },
     nextMgId() {
